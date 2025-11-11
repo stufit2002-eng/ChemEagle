@@ -8,6 +8,7 @@ from openai import AzureOpenAI
 
 API_KEY = os.getenv("API_KEY")
 AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
+API_VERSION = os.getenv("API_VERSION")
 
 client = AzureOpenAI(
     api_key=API_KEY,
