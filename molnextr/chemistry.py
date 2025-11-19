@@ -694,7 +694,7 @@ def _convert_graph_to_smiles(coords, symbols, edges, image=None, debug=False):
         pred_molblock = Chem.MolToMolBlock(mol)
         pred_smiles, mol = _expand_functional_group(mol, {}, debug)
         #print(f"after_expansion_SMILES: {pred_smiles}")
-        pred_smiles = align_chirality(smiles1, pred_smiles)
+        #pred_smiles = align_chirality(smiles1, pred_smiles)
         #print(f"final_SMILES: {pred_smiles}\n")
         mol = Chem.MolFromSmiles(pred_smiles)
         success = True
