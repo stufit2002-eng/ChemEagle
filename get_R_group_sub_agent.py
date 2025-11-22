@@ -255,7 +255,7 @@ def get_reaction_full(image_path: str) -> dict:
     #raw_prediction = get_reaction_withatoms_correctR(image_path)
     return raw_prediction
 
-def get_full_reaction(image_path: str) -> dict:
+def get_full_reaction_template(image_path: str) -> dict:
     '''
     Returns a structured dictionary of reactions extracted from the image,
     including reactants, conditions, and products, with their smiles, text, and bbox.
@@ -290,7 +290,7 @@ def get_full_reaction(image_path: str) -> dict:
     parsed = parse_coref_data_with_fallback(data)
 
     combined_result = {
-        "reaction_prediction": raw_prediction,  
+        #"reaction_prediction": raw_prediction,  
         "molecule_coref": parsed               
     }
     print(f"combined_result:{combined_result}")
