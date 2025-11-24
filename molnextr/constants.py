@@ -130,7 +130,7 @@ SUBSTITUTIONS: List[Substitution] = [
     Substitution(['OTBDMS'], '[OH0;D2][Si](C)(C)C(C)(C)C', "[O][Si](C)(C)C(C)(C)C", 0),  # TBDMS
     Substitution(['SP'], 'S[P]', "S[P]", 0), # Sulfenyl Phosphide
     Substitution(['CH3O'], '[OH0;D2][CH3]', "[O]C", 0),
-    Substitution(['OCN'], 'N=C=O', "N=C=O", 0),
+    Substitution(['OCN','NCO'], 'N=C=O', "N=C=O", 0),
     Substitution(['SO2NH2'], 'S(N)(=O)=O', "S(N)(=O)=O", 0),
     Substitution(['NHCOtBu'], 'NC(=O)C(C)(C)C', "NC(=O)C(C)(C)C", 0),
     Substitution(['SPh'], 'Sc1ccccc1', "Sc1ccccc1", 0),
