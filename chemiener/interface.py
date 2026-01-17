@@ -38,7 +38,7 @@ class ChemNER:
     def _get_args(self, cache_dir):
         parser = argparse.ArgumentParser()
 
-        parser.add_argument('--roberta_checkpoint', default = 'dmis-lab/biobert-large-cased-v1.1', type=str, help='which roberta config to use')
+        parser.add_argument('--roberta_checkpoint', default = 'biobert-large-cased', type=str, help='which roberta config to use')
 
         parser.add_argument('--corpus', default = "chemdner", type=str, help="which corpus should the tags be from")
 
