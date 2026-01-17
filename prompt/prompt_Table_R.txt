@@ -6,7 +6,7 @@ Run Table Parsing to get the R-group imformation​ from the table.
 correct OCR error: First find and match molecules and their outputs, then carefully compare with the original image to find those OCR errors of the symbols. Then replace them in the 'symbol' key in the tool output. 
 Replace explicit R-group: Replace R-group such as "[R]", "[R1]" and "[R2]" in "symbols" in both reactants and products with the corresponding detailed R, R1​ and R2​ symbols or  sub-sturcture SMILES from the table row by row.
 2. your output should be in the JSON format. We will provide <examples> in the end to help you output. 
-3. Finally, run the Graph2SMILES tool to get the complete reaction SMILES.
+3. Afterwards, the system will run the Graph2SMILES tool to get the complete reaction SMILES.
 
 Additional important Notes:  
 Please leave all other parts in the tool output unchanged.
