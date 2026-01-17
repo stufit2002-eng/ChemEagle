@@ -17,7 +17,7 @@ from typing import Optional
 from get_molecular_agent import process_reaction_image_with_multiple_products_and_text_correctR, process_reaction_image_with_multiple_products_and_text_correctmultiR
 from get_reaction_agent import get_reaction_withatoms_correctR
 from get_R_group_sub_agent import process_reaction_image_with_table_R_group, process_reaction_image_with_product_variant_R_group,get_full_reaction_template_OS,get_full_reaction_template, get_multi_molecular_full, process_reaction_image_with_table_R_group_OS,process_reaction_image_with_product_variant_R_group_OS,get_full_reaction_OS,get_reaction_OS
-from get_observer import action_observer_agent, plan_observer_agent
+from get_observer import action_observer_agent, plan_observer_agent,action_observer_agent_OS, plan_observer_agent_OS
 from get_text_agent import text_extraction_agent, text_extraction_agent_OS
 
 
@@ -464,7 +464,7 @@ def ChemEagle_OS(
     
     # Plan Observer: 审查和修改工具调用计划
     if use_plan_observer:
-        reviewed_plan = plan_observer_agent(image_path, serialized_calls)
+        reviewed_plan = plan_observer_agent_OS(image_path, serialized_calls)
         if not isinstance(reviewed_plan, list) or not reviewed_plan:
             plan_to_execute = serialized_calls
         else:
@@ -535,7 +535,7 @@ def ChemEagle_OS(
     print(f'[OS_D] results: {results}')
     
     # Action Observer: 检查执行结果，如果失败则重新执行
-    if use_action_observer and action_observer_agent(image_path, execution_logs):
+    if use_action_observer and action_observer_agent_OS(image_path, execution_logs):
         return {
             "redo": True,
             "plan": plan_to_execute,
