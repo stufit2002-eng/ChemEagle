@@ -107,21 +107,23 @@ print(results)
 
 #### Option B: Using ChemEagle_OS (Local Deployment with vLLM)
 
-**ChemEagle_OS** is an open-source version that runs locally using vLLM or Ollama, eliminating the need for cloud API keys.
+**ChemEagle_OS** is an open-source version that runs locally using vLLM, eliminating the need for cloud API keys.
 
 ##### Prerequisites
 - NVIDIA GPU with CUDA support (recommended)
 - Docker installed (for vLLM deployment)
 - Download the Qwen3-VL model weights (e.g., `Qwen3-VL-32B-Instruct-AWQ`) from [HuggingFace](https://huggingface.co/QuantTrio/Qwen3-VL-32B-Instruct-AWQ)
 
-##### Step 1: Setup Python Environment
+1. Setup Python Environment
 ```bash
 conda create -n chemeagle python=3.10
 conda activate chemeagle
 pip install -r requirements.txt
 ```
 
-##### Step 2: Deploy vLLM Server
+2. Download the necessary [models](https://huggingface.co/CYF200127/ChemEAGLEModel/tree/main) and put in the main path.
+
+3. Deploy vLLM Server
 
 **For Linux:**
 
@@ -161,9 +163,9 @@ docker run -d --gpus all `
 - Replace `/path/to/Qwen3-VL-32B-Instruct-AWQ` (Linux) or `F:/chemeagle/Qwen3-VL-32B-Instruct-AWQ` (Windows) with your actual model path.
 - The vLLM server will be available at `http://localhost:8000/v1` by default.
 
-##### Step 3: Use ChemEagle_OS
 
-After the vLLM server is running, you can use `ChemEagle_OS` as follows:
+
+4. After the vLLM server is running, you can use the open source version of ChemEAGLE as follows:
 
 ```python
 from main import ChemEagle_OS
@@ -174,7 +176,7 @@ results = ChemEagle_OS(image_path)
 print(results)
 ```
 
-Alternatively, run the following code to extract machine-readable chemical data from chemical literature (PDF files) directly:
+5. Alternatively, run the following code to extract machine-readable chemical data from chemical literature (PDF files) directly:
 ```python
 import os
 from main import ChemEagle_OS
@@ -199,9 +201,9 @@ print(results)
 ### Benchmarking
 Benchmark datasets, predictions, and ground truth can be found in our [Huggingface Repo](https://huggingface.co/datasets/CYF200127/ChemEagle/blob/main/Dataset.zip).
 
-## 🤗 Chemical information extraction using [ChemEAGLE.Web](https://huggingface.co/spaces/CYF200127/ChemEagle) 
+## 🤗 Chemical information extraction using [ChemEAGLE.Web](https://app.chemeagle.net/) 
 
-Go to our [ChemEAGLE.Web app demo](https://huggingface.co/spaces/CYF200127/ChemEagle) to directly use our tool online! (Note: The web demo only supports graphic input now. And it uses the default API version "2024-06-01".)
+Go to our [ChemEAGLE.Web app demo](https://app.chemeagle.net/) to directly use our tool online! (Note: The web demo only supports graphic input now.)
 
 When the input is a multimodal chemical reaction graphic:
 ![visualization](examples/reaction9.png)
