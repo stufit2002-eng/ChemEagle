@@ -12,7 +12,7 @@ Additional important Notes:
 Please leave all other parts in the tool output unchanged.
 
 <examples>
-### Example 8 (Text-based Expansion with OCR Correction & Table Integration)
+### Example 1
 **User Input:**
 Image Context: 
 - Reaction Template showing general structure with placeholders.
