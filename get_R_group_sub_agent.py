@@ -1370,7 +1370,7 @@ def process_reaction_image_with_table_R_group(image_path: str) -> dict:
             return base64.b64encode(image_file.read()).decode('utf-8')
 
     base64_image = encode_image(image_path)
-    with open('./prompt/prompt_reaction_withR.txt', 'r', encoding='utf-8') as prompt_file:
+    with open('./prompt/prompt_Table_R.txt', 'r', encoding='utf-8') as prompt_file:
         prompt = prompt_file.read()
     tools = [
     {
@@ -1631,7 +1631,7 @@ def process_reaction_image_with_table_R_group_OS(
             return base64.b64encode(image_file.read()).decode('utf-8')
 
     base64_image = encode_image(image_path)
-    with open('./prompt/prompt_reaction_withR.txt', 'r', encoding='utf-8') as prompt_file:
+    with open('./prompt/prompt_Table_R.txt', 'r', encoding='utf-8') as prompt_file:
         prompt = prompt_file.read()
     tools = [
         {
@@ -1775,7 +1775,7 @@ def process_reaction_image_with_table_R_group_OS(
             print(f"Available keys: {list(input2.keys())}")
             print(f"Full input2 content:\n{json.dumps(input2, indent=2, ensure_ascii=False)}")
             raise KeyError(f"'reactions' key not found in model response. Available keys: {list(input2.keys())}. "
-                          f"Please check the model response format and the prompt file './prompt/prompt_reaction_withR.txt'. "
+                          f"Please check the model response format and the prompt file './prompt/prompt_Table_R.txt'. "
                           f"The model may not be following the expected JSON schema.")
         
         # 遍历 input2 中的每个 reaction
