@@ -674,7 +674,7 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR(image_p
     ]
 
     # 提供给 GPT 的消息内容
-    with open('./prompt/prompt_getmolecular_correctmultiR.txt', 'r', encoding='utf-8') as prompt_file:
+    with open('./prompt/prompt_Mol_Reco.txt', 'r', encoding='utf-8') as prompt_file:
         prompt = prompt_file.read()
     messages = [
         {'role': 'system', 'content': 'You are a helpful assistant.'},
@@ -949,7 +949,7 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR_OS(
     ]
 
     # 提供给 GPT 的消息内容
-    with open('./prompt/prompt_getmolecular_correctmultiR.txt', 'r', encoding='utf-8') as prompt_file:
+    with open('./prompt/prompt_Mol_Reco.txt', 'r', encoding='utf-8') as prompt_file:
         prompt = prompt_file.read()
     messages = [
         {'role': 'system', 'content': 'You are a helpful assistant.'},
