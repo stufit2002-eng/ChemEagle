@@ -115,14 +115,53 @@ def text_extraction_agent(image_path: str) -> dict:
     ]
 
     # Prompt instructing to call both tools
-    prompt = (
-        "Please call the following two tools in order: "
-        "extract_reactions_from_text_in_image and NER_from_text_in_image. "
-        "First, extract all text from the image and merge into a single paragraph. "
-        "Second, identify chemical reactions, extracting reactants, products, reagents, and conditions. "
-        "Third, perform chemical named entity recognition to label molecules, reagents, and other chemical entities. "
-        "Return a JSON object with keys: reactions, NER_results."
-    )
+    prompt = """
+System Message: 
+You are the Text Extraction Agent. Your task is to extract text descriptions from chemical reaction images (or process direct text input), identify chemical entities and reactions within that text, and output a structured annotation.
+
+User Message: 
+In this input reaction graphic, there is a chemical reaction scheme template with multiple product/fragment molecular sub-images or tables, conditions, and a text description underneath (or you will receive direct text input).
+Your task is to:
+
+1. **Entity Extraction**: First call the `MolNER`(“NER_from_text_in_image") tool to extract chemical identities (names, formulas, abbreviations) from the text description.
+2. **Reaction Extraction**: Call the `RxnConInterpreter`("extract_reactions_from_text_in_image") tool to identify reaction types and relationships in the text description.
+3. **Correction & Alignment**: 
+   - Check the tool results and correct any errors.
+   - Align the identified text entities with the graphical output (e.g., mapping "precatalyst B27" in text to the molecule B27 in the image).
+4. **Output**: Your final output must be in JSON format. Use specific tags like `[reactant]`, `[reagent]`, `[ABBREVIATION]`, `[SMILES:...]` to annotate the original text.
+
+### Example 1
+**User Input:**
+Text Input: "In 2010, an enantioselective formal [3+2] cycloaddition of NHC-bound azolium enolates and oxaziridines was described by Ye and co-workers. Aryl(alkyl)-disubstituted ketenes were used as precursors of azolium enolates. A bifunctional NHC precatalyst B27 bearing a free hydroxyl group was employed."
+
+**Assistant Response:**
+Here is my step-by-step analysis:
+
+**Step 1: Entity Extraction (MolNER)**
+* **Observation:**
+    * "NHC-bound azolium enolates" -> Chemical (Plural/Class)
+    * "oxaziridines" -> Chemical (Systematic Name)
+    * "Aryl(alkyl)-disubstituted ketenes" -> Chemical (Reactant precursor)
+    * "NHC" -> Abbreviation
+    * "B27" -> Chemical (Identifier/Reagent)
+* **Action:** Tag these entities with their specific roles and types.
+
+**Step 2: Reaction & Structure Interpretation (RxnConInterpreter)**
+* **Observation:**
+    * "B27" is identified as a specific precatalyst.
+    * **Action:** Retrieve/Associate the SMILES for B27 from the tool/image context: `CCCC(C=CC=C1)=C1[N+]2=CN3[C@H](C(C1=CC(=CC(=C1C(F)(F)F)C(F)(F)F))(C1=CC(=CC(=C1C(F)(F)F)C(F)(F)F))O)CCC3=N2.F[B-](F)(F)F`.
+    * "azolium enolates" and "oxaziridines" are participating reactants in a [3+2] cycloaddition.
+
+**Step 3: Text Alignment & Annotation**
+* **Thought:** I need to inject the extracted tags and SMILES directly into the original text string to create the final description.
+* **Action:** Construct the annotated string.
+
+**Final JSON Output:**
+```json
+{
+  "annotated_text": "In 2010, an enantioselective formal [3+2] cycloaddition of NHC-bound azolium enolates [reactant][MULTIPLE] and oxaziridines [reactant][SYSTEMATIC] was described by Ye and co-workers. Aryl(alkyl)-disubstituted ketenes [reactant] were used as precursors of azolium enolates. A bifunctional NHC [ABBREVIATION] precatalyst B27 [reagent][IDENTIFIERS][SMILES:CCCC(C=CC=C1)=C1[N+]2=CN3[C@H](C(C1=CC(=CC(=C1C(F)(F)F)C(F)(F)F))(C1=CC(=CC(=C1C(F)(F)F)C(F)(F)F))O)CCC3=N2.F[B-](F)(F)F] bearing a free hydroxyl group was employed."
+}
+"""
 
     messages = [
         {"role": "system", "content": "You are an expert assistant for chemical text analysis."},
