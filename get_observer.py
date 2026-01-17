@@ -1,9 +1,11 @@
 import base64
 import json
 import os
-from typing import Any, List
+import time
+from typing import Any, List, Optional
 
-from openai import AzureOpenAI
+from openai import AzureOpenAI, OpenAI
+from openai import InternalServerError, RateLimitError, APIError
 
 
 API_KEY = os.getenv("API_KEY")
@@ -106,7 +108,8 @@ def plan_observer_agent(image_path: str, tool_calls: List[Any]) -> List[Any]:
         )
         content = response.choices[0].message.content
         parsed = json.loads(content)
-        return parsed.get("plan", tool_calls)
+        # Support both "plan" and "list_of_agents" keys for compatibility
+        return parsed.get("list_of_agents", parsed.get("plan", tool_calls))
     except Exception:
         return tool_calls
 
@@ -138,4 +141,213 @@ def action_observer_agent(image_path: str, tool_result: Any) -> bool:
         parsed = json.loads(content)
         return bool(parsed.get("redo", False))
     except Exception:
+        return False
+
+
+def retry_api_call(func, max_retries=3, base_delay=2, backoff_factor=2, *args, **kwargs):
+    """
+    通用的 API 调用重试函数，支持指数退避策略。
+    
+    Args:
+        func: 要调用的函数
+        max_retries: 最大重试次数
+        base_delay: 基础延迟时间（秒）
+        backoff_factor: 退避因子（每次重试延迟时间 = base_delay * backoff_factor^attempt）
+        *args, **kwargs: 传递给 func 的参数
+    
+    Returns:
+        func 的返回值
+    
+    Raises:
+        最后一次尝试的异常
+    """
+    last_exception = None
+    
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except (InternalServerError, RateLimitError, APIError) as e:
+            last_exception = e
+            error_code = getattr(e, 'status_code', None) or getattr(e, 'code', None)
+            error_message = str(e)
+            
+            # 检查是否是 503 错误或其他可重试的错误
+            if error_code == 503 or 'overloaded' in error_message.lower() or '503' in error_message:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (backoff_factor ** attempt)
+                    print(f"⚠️ API 调用失败 (503/过载)，第 {attempt + 1}/{max_retries} 次尝试。{delay:.1f} 秒后重试...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"❌ API 调用失败，已达到最大重试次数 ({max_retries})")
+                    raise
+            else:
+                # 其他类型的错误，直接抛出
+                raise
+        except Exception as e:
+            # 其他未知错误，直接抛出
+            raise
+    
+    # 如果所有重试都失败了
+    if last_exception:
+        raise last_exception
+    raise RuntimeError("API 调用失败，未知错误")
+
+
+def plan_observer_agent_OS(
+    image_path: str,
+    tool_calls: List[Any],
+    *,
+    model_name: str = "/models/Qwen3-VL-32B-Instruct-AWQ",
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> List[Any]:
+    """
+    OS 版本的 plan_observer_agent，使用兼容 OpenAI Chat Completions 协议的本地/自建模型。
+
+    Args:
+        image_path: 图像文件路径
+        tool_calls: 当前工具调用计划列表
+        model_name: 本地模型名称（默认 `/models/Qwen3-VL-32B-Instruct-AWQ`）
+        base_url: OpenAI 兼容接口地址，若为 None 则使用环境变量或默认值 `http://localhost:8000/v1`
+        api_key: 接口密钥，可为任意非空字符串（vLLM 默认可填 `"EMPTY"`）
+
+    Returns:
+        List[Any]: 审查后的工具调用计划列表
+    """
+    base_url = base_url or os.getenv("VLLM_BASE_URL", os.getenv("OLLAMA_BASE_URL", "http://localhost:8000/v1"))
+    api_key = api_key or os.getenv("VLLM_API_KEY", os.getenv("OLLAMA_API_KEY", "EMPTY"))
+
+    client_os = OpenAI(
+        base_url=base_url,
+        api_key=api_key,
+    )
+
+    base64_image = _encode_image(image_path)
+    plan_json = json.dumps(tool_calls or [], ensure_ascii=False, indent=2)
+    prompt = PLAN_PROMPT_TEMPLATE.format(plan_json=plan_json)
+
+    user_content = [{"type": "text", "text": prompt}]
+    if base64_image:
+        user_content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{base64_image}"},
+            }
+        )
+
+    try:
+        # Note: vLLM may not support response_format
+        response = retry_api_call(
+            client_os.chat.completions.create,
+            max_retries=5,
+            base_delay=3,
+            backoff_factor=2,
+            model=model_name,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0,
+            # response_format={"type": "json_object"},  # vLLM 可能不支持
+        )
+        content = response.choices[0].message.content
+        
+        # Try to parse JSON directly
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            # If direct parsing fails, try to extract JSON from text
+            try:
+                from get_R_group_sub_agent import extract_json_from_text_with_reasoning
+                parsed = extract_json_from_text_with_reasoning(content)
+                if parsed is None:
+                    raise ValueError("Failed to extract JSON from response")
+            except (ImportError, ValueError):
+                print(f"⚠️ 警告: plan_observer_agent_OS 无法解析 JSON，返回原始计划")
+                return tool_calls
+        
+        # Support both "plan" and "list_of_agents" keys for compatibility
+        return parsed.get("list_of_agents", parsed.get("plan", tool_calls))
+    except Exception as e:
+        print(f"⚠️ 警告: plan_observer_agent_OS 出错: {e}，返回原始计划")
+        return tool_calls
+
+
+def action_observer_agent_OS(
+    image_path: str,
+    tool_result: Any,
+    *,
+    model_name: str = "/models/Qwen3-VL-32B-Instruct-AWQ",
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> bool:
+    """
+    OS 版本的 action_observer_agent，使用兼容 OpenAI Chat Completions 协议的本地/自建模型。
+
+    Args:
+        image_path: 图像文件路径
+        tool_result: 工具执行结果
+        model_name: 本地模型名称（默认 `/models/Qwen3-VL-32B-Instruct-AWQ`）
+        base_url: OpenAI 兼容接口地址，若为 None 则使用环境变量或默认值 `http://localhost:8000/v1`
+        api_key: 接口密钥，可为任意非空字符串（vLLM 默认可填 `"EMPTY"`）
+
+    Returns:
+        bool: 是否需要重新执行（True 表示需要重做）
+    """
+    base_url = base_url or os.getenv("VLLM_BASE_URL", os.getenv("OLLAMA_BASE_URL", "http://localhost:8000/v1"))
+    api_key = api_key or os.getenv("VLLM_API_KEY", os.getenv("OLLAMA_API_KEY", "EMPTY"))
+
+    client_os = OpenAI(
+        base_url=base_url,
+        api_key=api_key,
+    )
+
+    base64_image = _encode_image(image_path)
+    result_json = json.dumps(tool_result, ensure_ascii=False, indent=2)
+    prompt = ACTION_PROMPT_TEMPLATE.format(result_json=result_json)
+
+    user_content = [{"type": "text", "text": prompt}]
+    if base64_image:
+        user_content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{base64_image}"},
+            }
+        )
+
+    try:
+        # Note: vLLM may not support response_format
+        response = retry_api_call(
+            client_os.chat.completions.create,
+            max_retries=5,
+            base_delay=3,
+            backoff_factor=2,
+            model=model_name,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0,
+            # response_format={"type": "json_object"},  # vLLM 可能不支持
+        )
+        content = response.choices[0].message.content
+        
+        # Try to parse JSON directly
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            # If direct parsing fails, try to extract JSON from text
+            try:
+                from get_R_group_sub_agent import extract_json_from_text_with_reasoning
+                parsed = extract_json_from_text_with_reasoning(content)
+                if parsed is None:
+                    raise ValueError("Failed to extract JSON from response")
+            except (ImportError, ValueError):
+                print(f"⚠️ 警告: action_observer_agent_OS 无法解析 JSON，返回 False（不重做）")
+                return False
+        
+        return bool(parsed.get("redo", False))
+    except Exception as e:
+        print(f"⚠️ 警告: action_observer_agent_OS 出错: {e}，返回 False（不重做）")
         return False
