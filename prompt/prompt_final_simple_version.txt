@@ -137,12 +137,14 @@ The result should look like this json format:
 }.
 
 Situation 2：
-  After you carefully check the image, if this is a reaction image that contains #### a text-based table and involve R-group replacement############, call the "process_reaction_image_with_table_R_group" agent tool and organize the condition on each row of the table. Please carefully confirm how many rows there are in this table, and then output the corresponding number of reactions according to this. The output format remains unchanged; And remove the "symbols" key in the final output.  !!!important: Make sure that no matter how many rows there are in the table, you should complete the output reactions for every rows. Sometimes tables are 20 rows, then output 20 reactions.
+  After you carefully check the image, if this is a reaction image that contains #### a text-based table and involve R-group replacement############, and the "process_reaction_image_with_table_R_group" agent tool was called. Then based on the tool output, organize the condition on each row of the table. Please carefully confirm how many rows there are in this table, and then output the corresponding number of reactions according to this. The output format remains unchanged; And remove the "symbols" key in the final output.  !!!important: Make sure that no matter how many rows there are in the table, you should complete the output reactions for every rows. Sometimes tables are 20 rows, then output 20 reactions.
 Situation 3：
-  After you carefully check the image, if this is a reaction image that contains only a text-based table and does not involve any R-group replacement, then call the "get_full_reaction" tool and organize the condition on each row of the table. Please carefully confirm how many rows there are in this table, and then output the corresponding number of reactions according to this. The output format remains unchanged. !!!important: Make sure that no matter how many rows there are in the table, you should complete the output reactions for every rows. Sometimes tables are 20 rows, then output 20 reactions.
+  After you carefully check the image, if this is a reaction image that contains only a text-based table and does not involve any R-group replacement, and the "get_full_reaction_template" tool was called. Then based on the tool output, organize the condition on each row of the table. Please carefully confirm how many rows there are in this table, and then output the corresponding number of reactions according to this. The output format remains unchanged. !!!important: Make sure that no matter how many rows there are in the table, you should complete the output reactions for every rows. Sometimes tables are 20 rows, then output 20 reactions.
 
 Situation 4：
-  After you carefully check the image, if this is a reaction image does not contain any tables or sets of product variants, then call the "get_full_reaction" tool and the output format should be like:
+  After you carefully check the image, if this is a reaction image does not contain any tables or sets of product variants, and the "get_full_reaction_template" tool was called.
+  Then based on the tool output, carefully recheck and compare the output of 'reaction_prediction' with the original image. If you notice that 'reaction_prediction' has obvious errors, such as having multiple steps of reaction but omitting many steps of the prediction. You have the right not to use the output of reaction_prediction. Please use all the molecules in the "molecule_coref" again, following the arrangement in the original diagram and the direction indicated by the arrows, and regenerate the reaction output.
+the output format should be like:
 {
     "reactions": [
         {
@@ -249,7 +251,7 @@ Situation 4：
 }
 
 Situation 5：
-  After you carefully check the image, if this is a single molecule image or a multiple molecules image, then just call the "get_multi_molecular_full" agent tool and the output format should be like:
+  After you carefully check the image, if this is a single molecule image or a multiple molecules image, and only the "get_multi_molecular_full" agent tool was called. Based on the tool output, the output format should be like:
   {
     "molecules": [
         {
