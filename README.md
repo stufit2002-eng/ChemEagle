@@ -177,7 +177,7 @@ print(results)
 Alternatively, run the following code to extract machine-readable chemical data from chemical literature (PDF files) directly:
 ```python
 import os
-from main import ChemEagle
+from main import ChemEagle_OS
 from pdf_extraction import run_pdf
 pdf_path   = 'your/pdf/path'
 output_dir = 'your/output/dir'
