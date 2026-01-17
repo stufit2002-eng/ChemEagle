@@ -1,7 +1,8 @@
 from PIL import Image
 import pytesseract
 from chemrxnextractor import RxnExtractor
-from openai import AzureOpenAI
+from openai import AzureOpenAI, OpenAI
+from typing import Optional
 model_dir = "./cre_models_v0.1"
 rxn_extractor = RxnExtractor(model_dir)
 import json
@@ -12,6 +13,11 @@ ckpt_path = hf_hub_download("Ozymandias314/ChemNERCkpt", "best.ckpt")
 model2 = ChemNER(ckpt_path, device=torch.device('cpu'))
 import base64
 import os
+import shutil
+import re
+import time
+from openai import InternalServerError, RateLimitError, APIError
+
 
 API_KEY = os.getenv("API_KEY")
 if not API_KEY:
