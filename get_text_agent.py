@@ -9,7 +9,7 @@ import json
 import torch
 from chemiener import ChemNER
 from huggingface_hub import hf_hub_download
-ckpt_path = hf_hub_download("Ozymandias314/ChemNERCkpt", "best.ckpt")
+ckpt_path = "./ner.ckpt"
 model2 = ChemNER(ckpt_path, device=torch.device('cpu'))
 import base64
 import os
