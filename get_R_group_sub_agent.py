@@ -858,7 +858,7 @@ def process_reaction_image_with_product_variant_R_group(image_path: str) -> dict
     ]
 
     # 提供给 GPT 的消息内容
-    with open('./prompt/prompt.txt', 'r', encoding='utf-8') as prompt_file:
+    with open('./prompt/prompt_Str_R.txt', 'r', encoding='utf-8') as prompt_file:
         prompt = prompt_file.read()
     messages = [
         {'role': 'system', 'content': 'You are a helpful assistant.'},
@@ -1145,7 +1145,7 @@ def process_reaction_image_with_product_variant_R_group_OS(
     ]
 
     # 提供给 GPT 的消息内容
-    with open('./prompt/prompt.txt', 'r', encoding='utf-8') as prompt_file:
+    with open('./prompt/prompt_Str_R.txt', 'r', encoding='utf-8') as prompt_file:
         prompt = prompt_file.read()
     messages = [
         {'role': 'system', 'content': 'You are a helpful assistant.'},
