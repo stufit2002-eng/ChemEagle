@@ -15,6 +15,401 @@ rdkit.RDLogger.DisableLog('rdApp.*')
 from SmilesPE.pretokenizer import atomwise_tokenizer
 
 from .constants import RGROUP_SYMBOLS, ABBREVIATIONS, VALENCES, FORMULA_REGEX
+import re
+import json
+import urllib.parse
+from typing import List, Optional, Dict, Tuple
+import requests
+import os
+from openai import AzureOpenAI
+
+API_KEY = os.getenv("API_KEY")
+if not API_KEY:
+    raise ValueError("Please set API_KEY")
+AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
+API_VERSION = os.getenv("API_VERSION")
+
+# ========== 外部服务基址 ==========
+OPSIN_BASE   = "https://opsin.ch.cam.ac.uk/opsin/"
+PUBCHEM_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+CIR_BASE     = "https://cactus.nci.nih.gov/chemical/structure"
+
+# ========== 速写词汇 ==========
+# 仅做“速写→英文可解析名”的小映射；不枚举SMILES
+GROUP_LEXICON: Dict[str, str] = {
+    # 卤/烷基
+    "F":"fluoro","Cl":"chloro","Br":"bromo","I":"iodo",
+    "Me":"methyl","Et":"ethyl","nPr":"propyl","iPr":"propan-2-yl",
+    "nBu":"butyl","sBu":"butan-2-yl","iBu":"2-methylpropyl","tBu":"tert-butyl",
+    # 烷氧/酯/保护基
+    "OMe":"methoxy","MeO":"methoxy","OEt":"ethoxy","OiPr":"propan-2-yloxy",
+    "OtBu":"tert-butoxy","OBn":"benzyloxy","OPh":"phenoxy","OCF3":"trifluoromethoxy",
+    "OAc":"acetoxy","OPiv":"pivaloyloxy",
+    "OTs":"4-tolylsulfonyloxy","OMs":"methanesulfonyloxy","OTf":"trifluoromethanesulfonyloxy",
+    # 含氮/羰基/强吸拉
+    "NO2":"nitro","NH2":"amino","NMe2":"dimethylamino","NEt2":"diethylamino",
+    "CHO":"formyl","Ac":"acetyl","COCH3":"acetyl","Bz":"benzoyl",
+    "CF3":"trifluoromethyl","CN":"cyano",
+    "CONH2":"carbamoyl","CONMe2":"dimethylcarbamoyl",
+    "CO2Me":"methoxycarbonyl","CO2Et":"ethoxycarbonyl",
+    "CO2iPr":"propan-2-yloxycarbonyl","CO2tBu":"tert-butoxycarbonyl",
+    "Boc":"tert-butoxycarbonyl","Cbz":"benzyloxycarbonyl",
+    # 硫基/磺酰
+    "SMe":"methylsulfanyl","SEt":"ethylsulfanyl","SPh":"phenylsulfanyl",
+    "SO2Me":"methanesulfonyl","SO2Ph":"phenylsulfonyl","SO2CF3":"trifluoromethanesulfonyl",
+    # 其它
+    "CF3O":"trifluoromethoxy","N3":"azido",
+}
+
+# “主官能团后缀”型（需挂在母体上）
+SUFFIX_GROUPS: Dict[str, str] = {
+    "B(OH)2": "boronic acid",  # 硼酸
+}
+
+# 家族识别（环代码→家族名 & 典型允许位点，仅作参考，不强拦截）
+_RING_FAMILIES: List[Tuple[re.Pattern, str, set]] = [
+    (re.compile(r"^C6H\d+$"),  "phenyl",   {2,3,4,5,6}),         # 苯基
+    (re.compile(r"^C10H\d+$"), "naphthyl", set(range(1,9))),     # 萘基
+    (re.compile(r"^C5H\d+N$"), "pyridyl",  {2,3,4}),             # 吡啶基
+    (re.compile(r"^C4H\d+S$"), "thienyl",  {2,3}),               # 噻吩基
+    (re.compile(r"^C4H\d+O$"), "furyl",    {2,3}),               # 呋喃基
+    (re.compile(r"^C8H\d+N$"), "indolyl",  {1,2,3,4,5,6,7}),     # 吲哚基
+]
+
+# 家族 → 母体名（用于后缀官能团）
+FAMILY_TO_PARENT: Dict[str, str] = {
+    "phenyl":"benzene","naphthyl":"naphthalene","pyridyl":"pyridine",
+    "thienyl":"thiophene","furyl":"furan","indolyl":"indole",
+}
+
+# 别名环（如 Ph / Py）
+RING_ALIASES = {"Ph":"phenyl","Py":"pyridyl","Th":"thienyl","Fur":"furyl","Np":"naphthyl","Ind":"indolyl"}
+
+# ========== 基础工具 ==========
+def _norm(s: str) -> str:
+    return s.replace(" ", "").replace("−","-").replace("–","-").replace("—","-")
+
+def _infer_ring_family(ring_code: str) -> Optional[Tuple[str,set]]:
+    if ring_code in RING_ALIASES:
+        fam = RING_ALIASES[ring_code]
+        allowed = next((al for pat,f,al in _RING_FAMILIES if f==fam), set())
+        return fam, allowed
+    for pat,fam,allowed in _RING_FAMILIES:
+        if pat.match(ring_code):
+            return fam, allowed
+    return None
+
+def _positions_to_prefix(positions: List[int], group_name: str) -> str:
+    if len(positions)==1:
+        return f"{positions[0]}-{group_name}"
+    pos_str = ",".join(str(p) for p in positions)
+    mult = {2:"bis",3:"tris",4:"tetrakis"}.get(len(positions),f"{len(positions)}-kis")
+    return f"{pos_str}-{mult}({group_name})"
+
+def _strip_group_multiplier(grp_raw: str) -> Tuple[str, Optional[int]]:
+    m = re.fullmatch(r"\(([^()]+)\)(\d+)", grp_raw)
+    if not m: return grp_raw, None
+    return m.group(1), int(m.group(2))
+
+# ========== 外部解析器 ==========
+def _opsin_name_to_smiles(name: str) -> Optional[str]:
+    url = f"{OPSIN_BASE}{urllib.parse.quote(name)}.json"
+    try:
+        r = requests.get(url, timeout=20)
+        if r.status_code!=200: return None
+        js = r.json()
+        if js.get("status")!="SUCCESS": return None
+        return js.get("smiles")
+    except Exception:
+        return None
+
+def _pubchem_name_to_smiles(name: str) -> Optional[str]:
+    # 名称 -> CID
+    url = f"{PUBCHEM_BASE}/compound/name/{urllib.parse.quote(name)}/cids/JSON"
+    try:
+        r = requests.get(url, timeout=20)
+        if r.status_code!=200: return None
+        cids = r.json().get("IdentifierList",{}).get("CID",[])
+        if not cids: return None
+        cid_str = ",".join(map(str, cids[:5]))  # 取前几个候选
+        url2 = f"{PUBCHEM_BASE}/compound/cid/{cid_str}/property/CanonicalSMILES/JSON"
+        r2 = requests.get(url2, timeout=20)
+        if r2.status_code!=200: return None
+        props = r2.json().get("PropertyTable",{}).get("Properties",[])
+        return props[0].get("CanonicalSMILES") if props else None
+    except Exception:
+        return None
+
+def _cir_name_to_smiles(name: str) -> Optional[str]:
+    url = f"{CIR_BASE}/{urllib.parse.quote(name)}/smiles"
+    try:
+        r = requests.get(url, timeout=20)
+        if r.status_code==200 and r.text.strip():
+            return r.text.strip()
+    except Exception:
+        pass
+    return None
+
+# ========== 速写 → 候选规范名（关键部分） ==========
+def _shorthand_candidates(token: str) -> List[str]:
+    """
+    输入如：
+      4-NO2C6H4, 3,5-CF3C6H3, 2-OMeC6H4, 4-BrC6H4,
+      1-NO2C10H7, 2-OMeC5H4N, 2-BrC4H3S, 2-OMeC4H3O,
+      4-B(OH)2C6H4, 3,5-B(OH)2C6H3
+    返回一组“可解析”的名称候选，按更可能成功的顺序排列。
+    """
+    t = _norm(token)
+    pat = (
+        r"(?P<pos>\d(?:,\d)*)-"                       # 位点  e.g. 3,5
+        r"(?P<grp>\([A-Za-z0-9]+\)\d+|[A-Za-z0-9()]+)"# 基团  e.g. CF3 / (MeO)3 / B(OH)2
+        r"(?P<ring>(?:C[0-9]+H[0-9]+[NOS]?)|(?:Ph|Py|Th|Fur|Np|Ind))"  # 环式/别名
+    )
+    m = re.fullmatch(pat, t)
+    if not m:
+        return []
+
+    positions = list(map(int, m.group("pos").split(",")))
+    grp_raw   = m.group("grp")
+    ring_code = m.group("ring")
+
+    fam = _infer_ring_family(ring_code)
+    if not fam:
+        return []
+    ring_family, _ = fam
+
+    # 处理 (X)3 倍数
+    grp_core, _mult = _strip_group_multiplier(grp_raw)
+
+    # 后缀型（如 B(OH)2）
+    if grp_core in SUFFIX_GROUPS:
+        suffix = SUFFIX_GROUPS[grp_core]
+        parent = FAMILY_TO_PARENT.get(ring_family, ring_family)
+
+        if len(positions) <= 1:
+            # 单位点：parent-<locant>-boronic acid；若没给位置，默认 1
+            loc = positions[0] if positions else 1
+            return [f"{parent}-{loc}-{suffix}"]  # e.g. benzene-4-boronic acid
+        else:
+            # 多位点：parent-1,3-di/tri/tetra boronic acid
+            pos_str = ",".join(str(p) for p in positions)
+            mult = {2:"di",3:"tri",4:"tetra"}.get(len(positions), f"{len(positions)}")
+            return [f"{parent}-{pos_str}-{mult}{suffix}"]  # e.g. benzene-1,3-diboronic acid
+
+    # 前缀型（如 CF3/NO2/OMe…）
+    group_name = GROUP_LEXICON.get(grp_core, grp_core)  # 直接把未知词交给解析器试
+    prefix = _positions_to_prefix(positions, group_name)
+
+    # 路线A：把它看作“取代基 + phenyl/naphthyl …” （如 3,5-bis(trifluoromethyl)phenyl）
+    candA = f"{prefix}{ring_family}"
+
+    # 路线B：把它看作“母体分子 + 多取代” （如 1,3-bis(trifluoromethyl)benzene）
+    # 经验规则：若家族是 phenyl → 母体用 benzene；naphthyl → naphthalene；等
+    parent = FAMILY_TO_PARENT.get(ring_family, None)
+    cands = [candA]
+    if parent:
+        # 选择“规范化起点 1”的母体定位：常用把第一位固定为 1，
+        # 其余位按邻/间/对就近规范化（简单启发：包含 2→1,2; 包含 4→1,4; 否则 1,3）
+        if len(positions) == 1:
+            posB = f"{positions[0]}"
+            candB = f"{parent}-{posB}-{group_name}"
+        else:
+            # 粗略规范：o(含2或6)->1,2；p(含4)->1,4；否则 m ->1,3,…（多取代时按示例常见 1,3,5）
+            if any(p in (2,6) for p in positions): canon = [1,2] + ([4] if len(positions)>=3 else [])
+            elif 4 in positions:                   canon = [1,4] + ([2] if len(positions)>=3 else [])
+            else:                                   canon = [1,3] + ([5] if len(positions)>=3 else [])
+            posB = ",".join(map(str, canon[:len(positions)]))
+            mult = {2:"bis",3:"tris",4:"tetrakis"}.get(len(positions), f"{len(positions)}-kis")
+            candB = f"{posB}-{mult}({group_name}){parent}"
+        cands.append(candB)
+
+    # 返回顺序：先尝试“母体分子”，再“取代基”
+    return cands
+
+# ========== 主接口 ==========
+def name2smiles(name: str, allow_shorthand: bool = True) -> Optional[str]:
+    """
+    输入任意名称：
+      - 直接 IUPAC 或常用英文名：先 OPSIN → 再 PubChem → 再 CIR
+      - 速写（如 3,5-CF3C6H3 / 4-B(OH)2C6H4）：先生成为若干“可解析的候选名”，逐个尝试
+    返回第一个成功解析的 SMILES；否则 None
+    """
+    s = name.strip()
+    # 1) 先直接解析（有些速写也可能被数据库认出来）
+    for fn in (_opsin_name_to_smiles, _pubchem_name_to_smiles, _cir_name_to_smiles):
+        smi = fn(s)
+        if smi: return smi
+
+    # 2) 速写路径
+    if allow_shorthand:
+        cands = _shorthand_candidates(s)
+        print(f"cands: {cands}")
+        for cand in cands:
+            for fn in (_opsin_name_to_smiles, _pubchem_name_to_smiles, _cir_name_to_smiles):
+                smi = fn(cand)
+                if smi: return smi
+    return None
+
+# ========== LLM 辅助函数 ==========
+def _load_prompt_template(prompt_file: str = "prompt/prompt_symbol_to_smiles.txt") -> str:
+    """
+    加载prompt模板文件。
+    
+    Args:
+        prompt_file: prompt文件路径（相对于项目根目录）
+    
+    Returns:
+        prompt模板字符串，如果文件不存在则返回默认模板
+    """
+    import os
+    import pathlib
+    
+    # 尝试多个可能的路径
+    possible_paths = [
+        prompt_file,  # 绝对路径或当前工作目录
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), prompt_file),  # 从molnextr目录向上
+        os.path.join(os.getcwd(), prompt_file),  # 当前工作目录
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return f.read()
+            except Exception:
+                continue
+    
+    # 如果文件不存在，返回默认模板
+    return """You are a cheminformatics expert. Please convert the following chemical symbol or name to SMILES format.
+
+Input symbol: {symbol}
+
+Requirements:
+1. The output must be a valid SMILES string
+2. **The connection point atom must be enclosed in square brackets []**, for example:
+   - [C] represents a connection point carbon atom
+   - [Si] represents a connection point silicon atom
+   - [c] represents a connection point aromatic carbon atom
+   - [O] represents a connection point oxygen atom
+   - [N] represents a connection point nitrogen atom
+   - [S] represents a connection point sulfur atom
+3. Output must be in JSON format: {{"smiles": "your_smiles_string"}}
+4. Only output the JSON object, do not add any explanations or additional text
+
+Examples:
+- Input: "CO2CH2Bn" or "CO2CH2Ph" → Output: {{"smiles": "[C](=O)O[CH2]c1ccccc1"}}
+- Input: "TIPS" → Output: {{"smiles": "[Si](C(C)C)(C(C)C)C(C)C"}}
+- Input: "C6F5" → Output: {{"smiles": "[c]1c(F)c(F)c(F)c(F)c1(F)"}}
+- Input: "4-BrC6H4" → Output: {{"smiles": "[c]1ccc(Br)cc1"}}
+- Input: "OMe" → Output: {{"smiles": "[O]C"}}
+- Input: "NO2" → Output: {{"smiles": "[N+](=O)[O-]"}}
+
+Please output the JSON object:"""
+
+
+def _llm_symbol_to_smiles(symbol: str, 
+                          api_key: Optional[str] = None,
+                          api_endpoint: Optional[str] = None,
+                          api_version: Optional[str] = None,
+                          model: str = "gpt-5-mini",
+                          prompt_file: Optional[str] = None) -> Optional[str]:
+    """
+    Convert chemical symbol to SMILES string using large language model.
+    
+    Requirements:
+    - Output must be valid SMILES format
+    - Connection point atoms must be enclosed in square brackets [] (e.g., [C], [Si], [c])
+    - Output must be in JSON format: {"smiles": "xxx"}
+    
+    Args:
+        symbol: Chemical symbol to convert
+        api_key: Azure OpenAI API key (if None, uses API_KEY from module or environment variable)
+        api_endpoint: Azure OpenAI endpoint (if None, uses AZURE_ENDPOINT from module or environment variable)
+        api_version: API version (if None, uses API_VERSION from module)
+        model: Model name to use
+        prompt_file: Path to prompt file (optional, defaults to prompt/prompt_symbol_to_smiles.txt)
+    
+    Returns:
+        SMILES string on success, None on failure
+    """
+    # 使用模块级别的配置作为默认值，然后是参数，最后是环境变量
+    # 优先级：函数参数 > 模块变量 > 环境变量
+    # 在同一个模块中，可以直接访问模块级别的变量
+    api_key = api_key or globals().get("API_KEY") or os.getenv("AZURE_OPENAI_API_KEY")
+    api_endpoint = api_endpoint or globals().get("AZURE_ENDPOINT") or os.getenv("AZURE_OPENAI_ENDPOINT")
+    api_version = api_version or globals().get("API_VERSION", "2024-10-21")
+    
+    # 如果没有 API_KEY 或 endpoint，静默返回 None（不启用 LLM）
+    if not api_key or not api_endpoint:
+        return None
+    
+    try:
+        client = AzureOpenAI(
+            api_key=api_key,
+            api_version=api_version,
+            azure_endpoint=api_endpoint
+        )
+        
+        # 加载prompt模板
+        prompt_template = _load_prompt_template(
+            prompt_file or "prompt/prompt_symbol_to_smiles.txt"
+        )
+        prompt = prompt_template.format(symbol=symbol)
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a professional cheminformatics assistant specialized in converting chemical symbols to SMILES format."},
+                {"role": "user", "content": prompt}
+            ],
+            #temperature=0,
+            response_format={"type": "json_object"}
+        )
+        
+        content = response.choices[0].message.content.strip()
+        #print(f"content: {content}")
+        
+        # 解析JSON输出
+        try:
+            result = json.loads(content)
+            smiles = result.get("smiles", "").strip()
+            
+            if not smiles:
+                return None
+            
+            # 验证输出是否为有效的SMILES（使用RDKit验证）
+            try:
+                mol = Chem.MolFromSmiles(smiles)
+                if mol is not None:
+                    return smiles
+            except Exception:
+                pass
+        except json.JSONDecodeError:
+            # 如果JSON解析失败，尝试直接提取（容错处理）
+            # 清理可能的markdown代码块标记
+            if content.startswith("```"):
+                lines = content.split("\n")
+                content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
+                content = content.strip()
+            
+            # 尝试提取JSON（可能在文本中）
+            json_match = re.search(r'\{[^}]*"smiles"[^}]*\}', content)
+            if json_match:
+                try:
+                    result = json.loads(json_match.group())
+                    smiles = result.get("smiles", "").strip()
+                    if smiles:
+                        mol = Chem.MolFromSmiles(smiles)
+                        if mol is not None:
+                            return smiles
+                except Exception:
+                    pass
+        
+        return None
+        
+    except Exception as e:
+        # 静默失败，返回None
+        return None
 
 
 
@@ -483,24 +878,54 @@ def _condensed_formula_list_to_smiles(formula_list, start_bond, end_bond=None, d
     return dfs('', start_bond, cur_idx, add_idx)
 
 
-def get_smiles_from_symbol(symbol, mol, atom, bonds):
-    """
-    Convert symbol (abbrev. or condensed formula) to smiles
-    If condensed formula, determine parsing direction and num. bonds on each side using coordinates
-    """
+def get_smiles_from_symbol(symbol, mol,atom, bonds, 
+                           use_llm: bool = True,
+                           llm_api_key: Optional[str] = None,
+                           llm_api_endpoint: Optional[str] = None,
+                           llm_model: str = "gpt-5-mini"):
+
     if symbol in ABBREVIATIONS:
         return ABBREVIATIONS[symbol].smiles
+
+    try_mol = Chem.MolFromSmiles(symbol)
+    if try_mol is not None:    
+        return symbol
+        
+    opsin_smiles = name2smiles(symbol)
+    if opsin_smiles:
+        return opsin_smiles 
 
     total_bonds = int(sum([bond.GetBondTypeAsDouble() for bond in bonds]))
     formula_list = _expand_carbon(_parse_formula(symbol))
     smiles, bonds_left, num_trails, success = _condensed_formula_list_to_smiles(formula_list, total_bonds, None)
     if success:
-        return smiles
+        # 验证 SMILES 是否是一个可行的分子
+        test_mol = Chem.MolFromSmiles(smiles)
+        if test_mol is not None:
+            return smiles
     
-    try_mol = Chem.MolFromSmiles(symbol)
-    if try_mol is not None:
-        return symbol
-    
+    # 最后一步：使用大语言模型（仅在配置了 API_KEY 时才启用）
+    if use_llm:
+        # 检查是否有可用的 API 配置（参数、模块变量或环境变量）
+        has_api_config = (
+            llm_api_key or 
+            llm_api_endpoint or 
+            globals().get("API_KEY") or 
+            globals().get("AZURE_ENDPOINT") or 
+            os.getenv("AZURE_OPENAI_API_KEY") or 
+            os.getenv("AZURE_OPENAI_ENDPOINT")
+        )
+        
+        if has_api_config:
+            llm_smiles = _llm_symbol_to_smiles(
+                symbol, 
+                api_key=llm_api_key,
+                api_endpoint=llm_api_endpoint,
+                model=llm_model
+            )
+            if llm_smiles:
+                return llm_smiles
+
     return None
 
 
@@ -545,88 +970,338 @@ def convert_smiles_to_mol(smiles):
 BOND_TYPES = {1: Chem.rdchem.BondType.SINGLE, 2: Chem.rdchem.BondType.DOUBLE, 3: Chem.rdchem.BondType.TRIPLE}
 
 
-def _expand_functional_group(mol, mappings, debug=False):
+def _num_swaps_to_interconvert(orders):
+    n = len(orders)
+    seen = [False] * n
+    nswaps = 0
+    for i in range(n):
+        if not seen[i]:
+            j = i
+            while orders[j] != i:
+                j = orders[j]
+                if j >= n:
+                    raise ValueError("_num_swaps_to_interconvert: index outside range")
+                seen[j] = True
+                nswaps += 1
+    return nswaps
+
+    
+def _expand_functional_group(mol, mappings, debug=True):
     def _need_expand(mol, mappings):
         return any([len(Chem.GetAtomAlias(atom)) > 0 for atom in mol.GetAtoms()]) or len(mappings) > 0
 
     if _need_expand(mol, mappings):
         mol_w = Chem.RWMol(mol)
         num_atoms = mol_w.GetNumAtoms()
-        for i, atom in enumerate(mol_w.GetAtoms()):  # reset radical electrons
+
+        # 重置所有原子的自由基电子
+        for atom in mol_w.GetAtoms():
             atom.SetNumRadicalElectrons(0)
 
         atoms_to_remove = []
+
         for i in range(num_atoms):
             atom = mol_w.GetAtomWithIdx(i)
-            if atom.GetSymbol() == '*':
-                symbol = Chem.GetAtomAlias(atom)
-                isotope = atom.GetIsotope()
-                if isotope > 0 and isotope in mappings:
-                    symbol = mappings[isotope]
-                if not (isinstance(symbol, str) and len(symbol) > 0):
+            if atom.GetSymbol() != '*':
+                continue
+
+            symbol = Chem.GetAtomAlias(atom)
+            isotope = atom.GetIsotope()
+            if isotope > 0 and isotope in mappings:
+                symbol = mappings[isotope]
+
+            if not (isinstance(symbol, str) and len(symbol) > 0):
+                continue
+
+            # R-group 标记（R1/R2 等）不展开
+            if symbol in RGROUP_SYMBOLS:
+                continue
+
+            bonds = atom.GetBonds()
+            sub_smiles = get_smiles_from_symbol(symbol, mol_w, atom, bonds)
+
+            # 从 SMILES 获得官能团分子
+            mol_r = convert_smiles_to_mol(sub_smiles)
+            if mol_r is None:
+                # 展不开就当普通 C 处理（或保持为 *，视你逻辑而定）
+                atom.SetIsotope(0)
+                continue
+
+            # ====== 记录原始键信息 & 可能受影响的手性中心 ======
+            bond_infos = []
+            chiral_centers_affected = set()
+            bonds_list = list(bonds)
+
+            for bond in bonds_list:
+                adj_idx = bond.GetOtherAtomIdx(i)
+                bond_infos.append(
+                    (
+                        adj_idx,
+                        int(round(bond.GetBondTypeAsDouble())),
+                        bond.GetBondDir()
+                    )
+                )
+                adj_atom = mol_w.GetAtomWithIdx(adj_idx)
+                if adj_atom.GetChiralTag() != Chem.rdchem.ChiralType.CHI_UNSPECIFIED:
+                    chiral_centers_affected.add(adj_idx)
+
+            # ====== 类 molzip_like：连接前标记手性中心邻居顺序 ======
+            chiral_mark_dict = {}  # {chiral_idx: mark_name}
+            for chiral_idx in chiral_centers_affected:
+                chiral_atom = mol_w.GetAtomWithIdx(chiral_idx)
+                tag = chiral_atom.GetChiralTag()
+                if tag not in (
+                    Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CW,
+                    Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CCW,
+                ):
                     continue
-                # rgroups do not need to be expanded
-                if symbol in RGROUP_SYMBOLS:
-                    continue
 
-                bonds = atom.GetBonds()
-                sub_smiles = get_smiles_from_symbol(symbol, mol_w, atom, bonds)
+                mark_name = f"__expand_chiral_mark_{chiral_idx}"
+                chiral_mark_dict[chiral_idx] = mark_name
 
-                # create mol object for abbreviation/condensed formula from its SMILES
-                mol_r = convert_smiles_to_mol(sub_smiles)
+                neighbors_before = list(chiral_atom.GetNeighbors())
+                order = 0
+                for nbr in neighbors_before:
+                    nbr.SetIntProp(mark_name, order)
+                    order += 1
 
-                if mol_r is None:
-                    # atom.SetAtomicNum(6)
-                    atom.SetIsotope(0)
-                    continue
+                if debug:
+                    print(f"  Marking neighbor order of chiral center {chiral_idx} (before expansion)")
+                    for idx_nb, nbr in enumerate(neighbors_before):
+                        if nbr.HasProp(mark_name):
+                            print(
+                                f"    Neighbor {nbr.GetIdx()}: order {nbr.GetIntProp(mark_name)} "
+                                f"(the {idx_nb}-th in GetNeighbors order)"
+                            )
 
-                # remove bonds connected to abbreviation/condensed formula
-                adjacent_indices = [bond.GetOtherAtomIdx(i) for bond in bonds]
-                for adjacent_idx in adjacent_indices:
-                    mol_w.RemoveBond(i, adjacent_idx)
+            if debug:
+                print(f"Expanding functional group {symbol} (atom {i})")
+                print(f"  bond_infos: {bond_infos}")
+                print(f"  chiral_centers_affected: {chiral_centers_affected}")
 
-                adjacent_atoms = [mol_w.GetAtomWithIdx(adjacent_idx) for adjacent_idx in adjacent_indices]
-                for adjacent_atom, bond in zip(adjacent_atoms, bonds):
-                    adjacent_atom.SetNumRadicalElectrons(int(bond.GetBondTypeAsDouble()))
+            # ====== 断开 * 与主体之间的所有键，并用自由基“记”键阶 ======
+            adjacent_indices = [bond.GetOtherAtomIdx(i) for bond in bonds_list]
+            for adjacent_idx in adjacent_indices:
+                mol_w.RemoveBond(i, adjacent_idx)
 
-                # get indices of atoms of main body that connect to substituent
-                bonding_atoms_w = adjacent_indices
-                # assume indices are concated after combine mol_w and mol_r
-                bonding_atoms_r = [mol_w.GetNumAtoms()]
+            adjacent_atoms = [mol_w.GetAtomWithIdx(adj_idx) for adj_idx in adjacent_indices]
+            for adjacent_atom, bond in zip(adjacent_atoms, bonds_list):
+                adjacent_atom.SetNumRadicalElectrons(int(bond.GetBondTypeAsDouble()))
+
+            bonding_atoms_w = adjacent_indices  # 主体侧连接点
+
+            if debug:
+                print(f"  Main molecule connection points (bonding_atoms_w): {bonding_atoms_w}")
+
+            # ====== 分析 sub_smiles 中的连接点顺序（官能团侧） ======
+            sub_smiles_atoms = []
+            if sub_smiles:
+                try:
+                    temp_mol = Chem.MolFromSmiles(sub_smiles)
+                    if temp_mol:
+                        for atm in temp_mol.GetAtoms():
+                            if atm.GetNumRadicalElectrons() > 0:
+                                sub_smiles_atoms.append(atm.GetIdx())
+                        # 若 SMILES 起始原子没有自由基，而你约定第一个原子也是连接点，则补上
+                        if sub_smiles.startswith('*') or sub_smiles.startswith('['):
+                            first_atom = temp_mol.GetAtomWithIdx(0)
+                            if first_atom.GetNumRadicalElectrons() == 0 and 0 not in sub_smiles_atoms:
+                                sub_smiles_atoms.insert(0, 0)
+                except Exception as e:
+                    if debug:
+                        print(f"  Failed to parse sub_smiles: {e}")
+
+            bonding_atoms_r = []
+
+            # 方法 1：按 sub_smiles 中自由基顺序确定连接点
+            if sub_smiles and len(sub_smiles_atoms) > 0:
+                base_idx = mol_w.GetNumAtoms()
+                for star_idx in sub_smiles_atoms:
+                    # star_idx 是 mol_r 中的原子 index
+                    bonding_atoms_r.append(base_idx + star_idx)
+
+            # 方法 2：fallback：默认第一个原子是主连接点
+            if len(bonding_atoms_r) == 0:
+                base_idx = mol_w.GetNumAtoms()
+                bonding_atoms_r = [base_idx]
                 for atm in mol_r.GetAtoms():
                     if atm.GetNumRadicalElectrons() and atm.GetIdx() > 0:
-                        bonding_atoms_r.append(mol_w.GetNumAtoms() + atm.GetIdx())
+                        bonding_atoms_r.append(base_idx + atm.GetIdx())
 
-                # combine main body and substituent into a single molecule object
-                combo = Chem.CombineMols(mol_w, mol_r)
+            if debug:
+                print(f"  Functional group connection points (bonding_atoms_r estimated): {bonding_atoms_r}")
+                print(f"  sub_smiles: {sub_smiles}")
+                print(f"  sub_smiles_atoms: {sub_smiles_atoms}")
 
-                # connect substituent to main body with bonds
-                mol_w = Chem.RWMol(combo)
-                # if len(bonding_atoms_r) == 1:  # substituent uses one atom to bond to main body
-                for atm in bonding_atoms_w:
-                    bond_order = mol_w.GetAtomWithIdx(atm).GetNumRadicalElectrons()
-                    mol_w.AddBond(atm, bonding_atoms_r[0], order=BOND_TYPES[bond_order])
+            # ====== Combine 主体与官能团 ======
+            combo = Chem.CombineMols(mol_w, mol_r)
+            mol_w = Chem.RWMol(combo)
 
-                # reset radical electrons
-                for atm in bonding_atoms_w:
-                    mol_w.GetAtomWithIdx(atm).SetNumRadicalElectrons(0)
-                for atm in bonding_atoms_r:
-                    mol_w.GetAtomWithIdx(atm).SetNumRadicalElectrons(0)
-                atoms_to_remove.append(i)
+            # ====== 决定最终配对的 target_atoms（官能团侧连接点） ======
+            target_atoms = []
+            if len(bonding_atoms_r) == len(bonding_atoms_w):
+                target_atoms = bonding_atoms_r
+                if debug:
+                    print(f"  Connection points count matches, matching in order: {bonding_atoms_w} -> {target_atoms}")
+            elif len(bonding_atoms_r) >= len(bonding_atoms_w):
+                target_atoms = bonding_atoms_r[:len(bonding_atoms_w)]
+                if debug:
+                    print(f"  More functional group connection points, taking first {len(bonding_atoms_w)}: {target_atoms}")
+            else:
+                if bonding_atoms_r:
+                    target_atoms = bonding_atoms_r + [bonding_atoms_r[-1]] * (
+                        len(bonding_atoms_w) - len(bonding_atoms_r)
+                    )
+                else:
+                    # 极端 fallback：如果实在找不到，就用最后一个原子
+                    target_atoms = [mol_w.GetNumAtoms() - 1] * len(bonding_atoms_w)
+                if debug:
+                    print(f"  Fewer functional group connection points, repeating the last one: {target_atoms}")
 
-        # Remove atom in the end, otherwise the id will change
-        # Reverse the order and remove atoms with larger id first
-        atoms_to_remove.sort(reverse=True)
-        for i in atoms_to_remove:
-            mol_w.RemoveAtom(i)
-        smiles = Chem.MolToSmiles(mol_w)
+            # ====== 加键 + 继承方向 + 传递手性标记 ======
+            for info, target_idx in zip(bond_infos, target_atoms):
+                adj_idx, order_val, bond_dir = info
+                order_val = max(1, min(3, order_val))
+                mol_w.GetAtomWithIdx(adj_idx).SetNumRadicalElectrons(order_val)
+
+                # 避免重复加键
+                existing_bond = mol_w.GetBondBetweenAtoms(adj_idx, target_idx)
+                if existing_bond is None:
+                    mol_w.AddBond(
+                        adj_idx,
+                        target_idx,
+                        order=BOND_TYPES.get(order_val, Chem.rdchem.BondType.SINGLE),
+                    )
+
+                new_bond = mol_w.GetBondBetweenAtoms(adj_idx, target_idx)
+                if new_bond is not None and bond_dir != Chem.BondDir.NONE:
+                    new_bond.SetBondDir(bond_dir)
+
+                # ====== 核心修正：从 dummy(*) 继承手性邻居顺序标记 ======
+                # i 是当前正在展开的 '*' 原子索引
+                dummy_atom = mol_w.GetAtomWithIdx(i)
+                for chiral_idx, mark_name in chiral_mark_dict.items():
+                    if dummy_atom.HasProp(mark_name):
+                        adj_order = dummy_atom.GetIntProp(mark_name)
+                        target_atom = mol_w.GetAtomWithIdx(target_idx)
+                        target_atom.SetIntProp(mark_name, adj_order)
+                        if debug:
+                            print(
+                                f"  Transferring mark: dummy atom {i} (order {adj_order}, chiral center {chiral_idx})"
+                                f" -> new atom {target_idx}"
+                            )
+
+            # ====== 连接后恢复手性（和 molzip_like 相同思想） ======
+            for chiral_idx in chiral_centers_affected:
+                if chiral_idx not in chiral_mark_dict:
+                    continue
+
+                mark_name = chiral_mark_dict[chiral_idx]
+                chiral_atom = mol_w.GetAtomWithIdx(chiral_idx)
+                tag = chiral_atom.GetChiralTag()
+
+                if tag not in (
+                    Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CW,
+                    Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CCW,
+                ):
+                    continue
+
+                neighbors_after = list(chiral_atom.GetNeighbors())
+                orders_after = []
+                all_have_mark = True
+                for nbr in neighbors_after:
+                    if not nbr.HasProp(mark_name):
+                        all_have_mark = False
+                        break
+                    orders_after.append(nbr.GetIntProp(mark_name))
+
+                if all_have_mark and len(orders_after) > 0:
+                    if debug:
+                        print(f"  Chiral center {chiral_idx}: neighbor order after connection {orders_after}")
+                    try:
+                        if set(orders_after) == set(range(len(orders_after))):
+                            nswaps = _num_swaps_to_interconvert(orders_after)
+                            if debug:
+                                print(f"  Number of swaps: {nswaps}")
+                            if nswaps % 2 == 1:
+                                if tag == Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CW:
+                                    chiral_atom.SetChiralTag(
+                                        Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CCW
+                                    )
+                                    if debug:
+                                        print(f"  Flipping chiral center {chiral_idx}: CW -> CCW")
+                                elif tag == Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CCW:
+                                    chiral_atom.SetChiralTag(
+                                        Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CW
+                                    )
+                                    if debug:
+                                        print(f"  Flipping chiral center {chiral_idx}: CCW -> CW")
+                        else:
+                            if debug:
+                                print(
+                                    f"  Warning: Neighbor marks of chiral center {chiral_idx} are not a valid permutation: {orders_after}"
+                                )
+                    except Exception as e:
+                        if debug:
+                            print(f"  Error calculating number of swaps (chiral center {chiral_idx}): {e}")
+                else:
+                    if debug:
+                        missing = [
+                            nbr.GetIdx()
+                            for nbr in neighbors_after
+                            if not nbr.HasProp(mark_name)
+                        ]
+                        print(
+                            f"  Chiral center {chiral_idx}: Some neighbors lack marks, cannot determine chirality change (neighbors missing marks: {missing})"
+                        )
+
+            # 清除临时自由基
+            for atm_idx in bonding_atoms_w:
+                mol_w.GetAtomWithIdx(atm_idx).SetNumRadicalElectrons(0)
+            for atm_idx in bonding_atoms_r:
+                if 0 <= atm_idx < mol_w.GetNumAtoms():
+                    mol_w.GetAtomWithIdx(atm_idx).SetNumRadicalElectrons(0)
+
+            # 局部 sanitize（不强制重算立体化学）
+            try:
+                Chem.SanitizeMol(mol_w)
+            except Exception as e:
+                if debug:
+                    print(f"Warning: Failed to sanitize after expanding {symbol}: {e}")
+
+            # 记录要删除的 '*' 原子
+            atoms_to_remove.append(i)
+
+        # ====== 删除所有 * 原子（从大 index 开始） ======
+        atoms_to_remove = sorted(set(atoms_to_remove), reverse=True)
+        for idx in atoms_to_remove:
+            if idx < mol_w.GetNumAtoms():
+                mol_w.RemoveAtom(idx)
+
+        # 清理临时手性标记属性
+        for atom in mol_w.GetAtoms():
+            for prop in list(atom.GetPropNames()):
+                if prop.startswith("__expand_chiral_mark"):
+                    atom.ClearProp(prop)
+
+        # 最终 sanitize
+        try:
+            Chem.SanitizeMol(mol_w)
+        except Exception as e:
+            if debug:
+                print("Warning: Failed to final sanitize after expanding functional groups:", e)
+
+        smiles = Chem.MolToSmiles(mol_w, isomericSmiles=True)
         mol = mol_w.GetMol()
     else:
-        smiles = Chem.MolToSmiles(mol)
+        smiles = Chem.MolToSmiles(mol, isomericSmiles=True)
+        mol = mol
+
     return smiles, mol
 
 
 def _convert_graph_to_smiles(coords, symbols, edges, image=None, debug=False):
+    print(f"symbols: {symbols}")
     mol = Chem.RWMol()
     n = len(symbols)
     ids = []
@@ -678,7 +1353,7 @@ def _convert_graph_to_smiles(coords, symbols, edges, image=None, debug=False):
         pred_smiles = rdkit.Chem.MolToSmiles(mol, isomericSmiles=True, canonical=True)
     except Exception as e:
         pred_smiles = '<invalid>'
-        
+    #print(f"initial_SMILES: {smiles}")
     try:
         # TODO: move to an util function
         if image is not None:
