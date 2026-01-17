@@ -12,11 +12,24 @@ API_KEY = os.getenv("API_KEY")
 AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
 API_VERSION = os.getenv("API_VERSION")
 
-client = AzureOpenAI(
-    api_key=API_KEY,
-    api_version="2024-06-01",
-    azure_endpoint=AZURE_ENDPOINT,
-)
+_client = None
+
+def _get_client():
+    global _client
+    if _client is None:
+        api_key = API_KEY or os.getenv("AZURE_OPENAI_API_KEY")
+        azure_endpoint = AZURE_ENDPOINT or os.getenv("AZURE_OPENAI_ENDPOINT")
+        api_version = API_VERSION or "2024-06-01"
+        
+        if not api_key or not azure_endpoint:
+            return None
+        
+        _client = AzureOpenAI(
+            api_key=api_key,
+            api_version=api_version,
+            azure_endpoint=azure_endpoint,
+        )
+    return _client
 
 PLAN_PROMPT_TEMPLATE = """System Message: 
 You are a plan observer. Given the graphic and the current list of agent calls (plan), decide whether the plan is sufficient.
@@ -98,6 +111,11 @@ def plan_observer_agent(image_path: str, tool_calls: List[Any]) -> List[Any]:
         )
 
     try:
+        client = _get_client()
+        if client is None:
+            # 没有 API 配置，返回原始计划
+            return tool_calls
+        
         response = client.chat.completions.create(
             model="gpt-5-mini",
             response_format={"type": "json_object"},
@@ -129,6 +147,11 @@ def action_observer_agent(image_path: str, tool_result: Any) -> bool:
         )
 
     try:
+        client = _get_client()
+        if client is None:
+            # 没有 API 配置，返回 False（不重做）
+            return False
+        
         response = client.chat.completions.create(
             model="gpt-5-mini",
             response_format={"type": "json_object"},
