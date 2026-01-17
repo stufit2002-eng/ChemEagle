@@ -16,32 +16,60 @@ client = AzureOpenAI(
     azure_endpoint=AZURE_ENDPOINT,
 )
 
-PLAN_PROMPT_TEMPLATE = """You are a workflow reviewer. Given the image and the current list of tool calls (plan), decide whether the plan is sufficient.
-- If the plan is acceptable, return the original plan as-is.
-- If adjustments are required, provide the improved plan and briefly explain the changes.
+PLAN_PROMPT_TEMPLATE = """System Message: 
+You are a plan observer. Given the graphic and the current list of agent calls (plan), decide whether the plan is sufficient.
+
+User Message: 
+Given the graphic and the current list of agent calls (plan), please recheck the component of the graphic and decide whether the corresponding agent is called and the plan is sufficient.
+Valid agents:
+1. Reaction template parsing agent
+Parses the reaction scheme to identify reactants, products, and label mappings, and outputs a structured reaction template.
+
+2. Molecular recognition agent
+Detects other molecules in the graphic except in the reaction template, recognizes their structures, and returns normalized representations (e.g., SMILES, labels, positions).
+
+3. Structure-based R-group substitution agent
+Uses structure panels / variant images to extract R-group values and generate enumerated products from a core scaffold based on structural information.
+
+4. Text-based R-group substitution agent
+Reads R-group tables and enumerates products or substituents on top of a given core scaffold using text information.
+
+5. Condition interpretation agent
+Extracts and normalizes reaction conditions (catalysts, reagents, solvent, temperature, time, atmosphere, etc.) from the graphic.
+
+6. Text extraction agent
+Performs chmical NER and text-based reaction extraction on the text description.
+
+If the plan is acceptable, return the original plan as-is.
+If adjustments are required, provide the improved list of agents and briefly explain the changes.
 
 Always respond in valid JSON with the structure:
 {
-  "plan": [...],   // final list of tool_calls
-  "changed": true/false,
-  "reason": "If changed is true, give a short explanation; otherwise leave blank."
+  "list_of_agents": [...],   // final list of agent calls
+  "redo": true/false,
+  "reason": "If changed is true, give an explanation; otherwise leave blank."
 }
 
 Current plan (JSON):
 {plan_json}
 """
 
-ACTION_PROMPT_TEMPLATE = """You are an execution auditor. Using the image and the current tool execution results (tool_result), decide whether the workflow must be rerun.
-- If the outcome is acceptable, return redo=false.
-- If issues are found or corrections are needed, return redo=true with a short explanation.
+ACTION_PROMPT_TEMPLATE = """System Message: 
+You are an action observer. Your task is too observe the graphic and the current agent output, decide whether the agent must be rerun.
+
+User Message: 
+By observing the image and the current agent output, decide whether the agent must be rerun.
+The main focus is on whether the SMILES is reasonable and effective. Is the condition or text classification correct?
+If the outcome is acceptable, return redo=false.
+If issues are found or corrections are needed, return redo=true with a short explanation.
 
 Always respond in valid JSON with the structure:
 {
   "redo": true/false,
-  "reason": "Provide a short reason when redo is true; otherwise leave blank."
+  "reason": "Provide the reasons when redo is true; otherwise leave blank."
 }
 
-Current tool_result (JSON):
+Current agent_result (JSON):
 {result_json}
 """
 
@@ -69,8 +97,7 @@ def plan_observer_agent(image_path: str, tool_calls: List[Any]) -> List[Any]:
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
-            temperature=0,
+            model="gpt-5-mini",
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},
@@ -100,8 +127,7 @@ def action_observer_agent(image_path: str, tool_result: Any) -> bool:
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
-            temperature=0,
+            model="gpt-5-mini",
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},
