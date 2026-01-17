@@ -3,7 +3,6 @@ import torch
 import json
 from chemietoolkit import ChemIEToolkit,utils
 import cv2
-from openai import AzureOpenAI
 import numpy as np
 from PIL import Image
 import json
