@@ -53,34 +53,37 @@ Clone the following repositories:
 ```
 git clone https://github.com/CYF2000127/ChemEagle
 ```
-### Example usage of the ChemEAGLE
+#### Option A: Using Azure OpenAI (Cloud-based)
+
 1. First create and activate a [conda](https://numdifftools.readthedocs.io/en/stable/how-to/create_virtual_env_with_conda.html) environment with the following command in a Linux, Windows, or MacOS environment (Linux is the most recommended):
-```
+```bash
 conda create -n chemeagle python=3.10
 conda activate chemeagle
 ```
 
 2. Then install requirements:
-```
+```bash
 pip install -r requirements.txt
 ```
+
 3. Download the necessary [models](https://huggingface.co/CYF200127/ChemEAGLEModel/tree/main) and put in the main path.
 
 4. Set up your Azure OpenAI API key in your environment. Here are two detailed tutorials ([Chinese Version](https://zhuanlan.zhihu.com/p/678367436), [English Version](https://www.datacamp.com/tutorial/azure-openai)) on how to obtain the Azure OpenAI API key and endpoint (Remember to use the API key and the endpoint in the Azure AI Studio).
-```
+```bash
 export API_KEY=your-azure-openai-api-key
 export AZURE_ENDPOINT=your-azure-endpoint
 export API_VERSION=your-api-version
 ```
 
-4. Run the following code to extract machine-readable chemical data from chemical graphics:
+5. Run the following code to extract machine-readable chemical data from chemical graphics:
 ```python
 from main import ChemEagle
 image_path = './examples/1.png'
 results = ChemEagle(image_path)
 print(results)
 ```
-5. Alternatively, run the following code to extract machine-readable chemical data from chemical literature (PDF files) directly:
+
+6. Alternatively, run the following code to extract machine-readable chemical data from chemical literature (PDF files) directly:
 ```python
 import os
 from main import ChemEagle
@@ -100,6 +103,104 @@ for fname in sorted(os.listdir(output_dir)):
     except Exception as e:
         results.append({'image_name': fname, 'error': str(e)})
 print(results)
+```
+
+#### Option B: Using ChemEagle_OS (Local Deployment with vLLM)
+
+**ChemEagle_OS** is an open-source version that runs locally using vLLM or Ollama, eliminating the need for cloud API keys.
+
+##### Prerequisites
+- NVIDIA GPU with CUDA support (recommended)
+- Docker installed (for vLLM deployment)
+- Download the Qwen3-VL model weights (e.g., `Qwen3-VL-32B-Instruct-AWQ`) from [HuggingFace](https://huggingface.co/Qwen/Qwen3-VL-32B-Instruct-AWQ)
+
+##### Step 1: Setup Python Environment
+```bash
+conda create -n chemeagle python=3.10
+conda activate chemeagle
+pip install -r requirements.txt
+```
+
+##### Step 2: Deploy vLLM Server
+
+**For Linux:**
+
+```bash
+docker run -d --gpus all \
+    -p 8000:8000 \
+    -v /path/to/Qwen3-VL-32B-Instruct-AWQ:/models/Qwen3-VL-32B-Instruct-AWQ \
+    --name vllm-server \
+    vllm/vllm-openai:latest \
+    --model /models/Qwen3-VL-32B-Instruct-AWQ \
+    --port 8000 \
+    --trust-remote-code \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes \
+    --max-model-len 27200 \
+    --limit-mm-per-prompt.video 0
+```
+
+**For Windows (PowerShell):**
+
+```powershell
+docker run -d --gpus all `
+    -p 8000:8000 `
+    -v F:/chemeagle/Qwen3-VL-32B-Instruct-AWQ:/models/Qwen3-VL-32B-Instruct-AWQ `
+    --name vllm-server `
+    vllm/vllm-openai:latest `
+    --model /models/Qwen3-VL-32B-Instruct-AWQ `
+    --port 8000 `
+    --trust-remote-code `
+    --enable-auto-tool-choice `
+    --tool-call-parser hermes `
+    --max-model-len 27200 `
+    --limit-mm-per-prompt.video 0
+```
+
+**Note:** 
+- Replace `/path/to/Qwen3-VL-32B-Instruct-AWQ` (Linux) or `F:/chemeagle/Qwen3-VL-32B-Instruct-AWQ` (Windows) with your actual model path.
+- The vLLM server will be available at `http://localhost:8000/v1` by default.
+
+##### Step 3: Use ChemEagle_OS
+
+After the vLLM server is running, you can use `ChemEagle_OS` as follows:
+
+```python
+from main import ChemEagle_OS
+
+# Using default local vLLM server (http://localhost:8000/v1)
+image_path = './examples/1.png'
+results = ChemEagle_OS(image_path)
+print(results)
+```
+
+Or specify a custom base URL:
+
+```python
+from main import ChemEagle_OS
+
+# Specify custom vLLM or Ollama server URL
+image_path = './examples/1.png'
+results = ChemEagle_OS(
+    image_path,
+    base_url="http://localhost:8000/v1",  # vLLM or Ollama server URL
+    api_key="EMPTY"  # Usually not required for local servers
+)
+print(results)
+```
+
+You can also set environment variables for default configuration:
+
+```bash
+export VLLM_BASE_URL=http://localhost:8000/v1
+export VLLM_API_KEY=EMPTY
+```
+
+Or use Ollama instead of vLLM:
+
+```bash
+export OLLAMA_BASE_URL=http://localhost:11434/v1
+export OLLAMA_API_KEY=ollama
 ```
 
 ### Benchmarking
