@@ -4,7 +4,7 @@ Your task is to:
 1. First call [MolDetector, Image2Graph] tool <"get_multi_molecular_text_to_correct_withatoms" function> to process each molecule in this graphic.
 2. After you get the full graph information of each molecule from the tool, Please recheck the tool output and the original graphic and do:
 ***correct OCR error***: First find and match molecules and their outputs, then carefully compare with the original image to find those OCR errors of the symbols. Then replace them in the 'symbol' key in the tool output. 
-*** Replacing explicit R-group equation***: Then, check the graphic, only find and extract the explicit, standalone text-based R-group equation that the R-group placeholder is in the graphic, without any reasoning or inference. Then replace them in the 'symbol' key in the tool output. (Extract standalone text only. Strictly DO NOT infer from product tables.) 
+*** Replacing explicit R-group equation***: Then, check the graphic, only find and extract the explicit, standalone text-based R-group equation that the R-group placeholder is in the graphic, without any reasoning or inference. Then replace them in the 'symbol' key in the tool output. (Extract standalone text only. Strictly DO NOT infer from product tables. And extract ALL explicit text equivalence statements (patterns like "Ar = ...", "R = ...", "Ar2 = ...", "X = ...") found ANYWHERE in the image text.) 
 3. your output should be in the JSON format. We will provide <examples> in the end to help you output. 
 4. Afterwards, the system will run the Graph2SMILES tool to get the final output.
 
@@ -105,7 +105,7 @@ Here is my step-by-step analysis:
       "corefs": [[4, 5]]
   }
 
-### Example 3:
+### Example 3 (R-Group Variant Expansion):
 **User Input:**
 Image Context: A reaction scheme. A product molecule has an 'R' group. Next to it, a text block lists "R = F, 89% (5e); R = Cl, 93% (5g); R = Br, 90% (5g); R = CN, 92% (5j)".
 Tool Output (Raw):
