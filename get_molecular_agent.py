@@ -19,8 +19,11 @@ import json
 from PIL import Image
 import numpy as np
 from chemietoolkit import ChemIEToolkit, utils
-from openai import AzureOpenAI
+from openai import AzureOpenAI, OpenAI, InternalServerError, RateLimitError, APIError
 import os
+import copy
+from typing import Optional
+import time
 
 
 def retry_api_call(func, max_retries=3, base_delay=2, backoff_factor=2, *args, **kwargs):
