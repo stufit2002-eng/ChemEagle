@@ -396,7 +396,7 @@ def get_reaction_withatoms_correctR(image_path: str) -> dict:
     ]
 
     # 提供给 GPT 的消息内容
-    with open('./prompt/prompt_getreaction_correctR.txt', 'r', encoding='utf-8') as prompt_file:
+    with open('./prompt/prompt_Rxn_Tem.txt', 'r', encoding='utf-8') as prompt_file:
         prompt = prompt_file.read()
     messages = [
         {'role': 'system', 'content': 'You are a helpful assistant.'},
@@ -575,22 +575,9 @@ def get_reaction_withatoms_correctR_OS(
     model_name: str = "/models/Qwen3-VL-32B-Instruct-AWQ",
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
-    # model_name="gemini-2.5-flash",
-    # base_url="https://generativelanguage.googleapis.com/v1beta/openai/", 
-    # api_key="AIzaSyBL8j4MbHAPhq8cR4Y05o9tY5Zq6fMDU3g"  
 ) -> dict:
-    """
-    与 get_reaction_withatoms_correctR 流程保持一致，但改用兼容 OpenAI Chat Completions 协议的本地/自建模型（如 vLLM 或 Ollama）。
+ 
 
-    Args:
-        image_path: 图像文件路径。
-        model_name: 本地模型名称（默认 `qwen3-vl:32b`）。
-        base_url: OpenAI 兼容接口地址，若为 None 则使用 `http://localhost:8000/v1` (vLLM 默认端口)。
-        api_key: 接口密钥，可为任意非空字符串（vLLM 默认可填 `"EMPTY"`）。
-
-    Returns:
-        dict: 整理后的反应数据，包括反应物、产物和反应模板。
-    """
     base_url = base_url or os.getenv("VLLM_BASE_URL", os.getenv("OLLAMA_BASE_URL", "http://localhost:8000/v1"))
     api_key = api_key or os.getenv("VLLM_API_KEY", os.getenv("OLLAMA_API_KEY", "EMPTY"))
 
@@ -629,7 +616,7 @@ def get_reaction_withatoms_correctR_OS(
     ]
 
     # 提供给 GPT 的消息内容
-    with open('./prompt/prompt_getreaction_correctR.txt', 'r', encoding='utf-8') as prompt_file:
+    with open('./prompt/prompt_Rxn_Tem.txt', 'r', encoding='utf-8') as prompt_file:
         prompt = prompt_file.read()
     messages = [
         {'role': 'system', 'content': 'You are a helpful assistant.'},
