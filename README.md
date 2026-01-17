@@ -112,7 +112,7 @@ print(results)
 ##### Prerequisites
 - NVIDIA GPU with CUDA support (recommended)
 - Docker installed (for vLLM deployment)
-- Download the Qwen3-VL model weights (e.g., `Qwen3-VL-32B-Instruct-AWQ`) from [HuggingFace](https://huggingface.co/Qwen/Qwen3-VL-32B-Instruct-AWQ)
+- Download the Qwen3-VL model weights (e.g., `Qwen3-VL-32B-Instruct-AWQ`) from [HuggingFace](https://huggingface.co/QuantTrio/Qwen3-VL-32B-Instruct-AWQ)
 
 ##### Step 1: Setup Python Environment
 ```bash
@@ -174,33 +174,26 @@ results = ChemEagle_OS(image_path)
 print(results)
 ```
 
-Or specify a custom base URL:
-
+Alternatively, run the following code to extract machine-readable chemical data from chemical literature (PDF files) directly:
 ```python
-from main import ChemEagle_OS
-
-# Specify custom vLLM or Ollama server URL
-image_path = './examples/1.png'
-results = ChemEagle_OS(
-    image_path,
-    base_url="http://localhost:8000/v1",  # vLLM or Ollama server URL
-    api_key="EMPTY"  # Usually not required for local servers
-)
+import os
+from main import ChemEagle
+from pdf_extraction import run_pdf
+pdf_path   = 'your/pdf/path'
+output_dir = 'your/output/dir'
+run_pdf(pdf_dir=pdf_path, image_dir=output_dir)
+results = []
+for fname in sorted(os.listdir(output_dir)):
+    if not fname.lower().endswith('.png'):
+        continue
+    img_path = os.path.join(output_dir, fname)
+    try:
+        r = ChemEagle_OS(img_path)
+        r['image_name'] = fname
+        results.append(r)
+    except Exception as e:
+        results.append({'image_name': fname, 'error': str(e)})
 print(results)
-```
-
-You can also set environment variables for default configuration:
-
-```bash
-export VLLM_BASE_URL=http://localhost:8000/v1
-export VLLM_API_KEY=EMPTY
-```
-
-Or use Ollama instead of vLLM:
-
-```bash
-export OLLAMA_BASE_URL=http://localhost:11434/v1
-export OLLAMA_API_KEY=ollama
 ```
 
 ### Benchmarking
