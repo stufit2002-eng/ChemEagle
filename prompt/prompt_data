@@ -15,7 +15,7 @@ Each enumerated reaction (e.g. 1a, 2a, 3a…) should be a separate reaction entr
 Reactants / Products
 "reactants" and "products" must both be lists of objects.
 Each object must have:
-"smiles": SMILES string of the molecule (template or enumerated).
+"smiles": SMILES string of the molecule (template or enumerated). Please do not change any of the SMILES string from the tool output
 "label": the label used in the scheme or table (e.g. "1", "2", "1a", "2a", "3a").
 
 Conditions list ("condition")
