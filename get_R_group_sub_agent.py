@@ -40,6 +40,89 @@ AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
 API_VERSION = os.getenv("API_VERSION")
 
 
+def normalize_product_variant_output(data: dict) -> dict:
+   
+    if not isinstance(data, dict):
+        raise ValueError("Input data must be a dictionary")
+    
+    normalized_reactions = []
+    original_molecule_list = data.get('original_molecule_list', {})
+    
+    # 1. 处理 reaction_template（第一个 reaction，reaction_id = '0_1'）
+    if 'reaction_template' in data:
+        template = data['reaction_template']
+        template_reactants = template.get('reactants', [])
+        template_products = template.get('products', [])
+        
+        # 尝试从 original_molecule_list 中找到 product template 的 label
+        template_product_labels = []
+        if template_products:
+            # 为每个 product 查找对应的 label
+            for template_product_smiles in template_products:
+                template_product_label = None
+                # 在 original_molecule_list 中查找匹配的 SMILES，寻找 template 相关的条目
+                if template_product_smiles in original_molecule_list:
+                    info = original_molecule_list[template_product_smiles]
+                    if isinstance(info, list) and len(info) > 0:
+                        # 检查是否是 template 相关（info 中可能包含 'reactant template' 或 'product template'）
+                        info_str = ' '.join(str(item).lower() for item in info)
+                        if 'template' in info_str:
+                            # 从 info[0] 获取 label
+                            template_product_label = str(info[0]) if info[0] else None
+                template_product_labels.append(template_product_label)
+        
+        normalized_reactions.append({
+            'reaction_id': '0_1',
+            'note': 'reaction template',
+            'reactants': [{'smiles': smiles} for smiles in template_reactants],
+            'conditions': [],
+            'products': [{'smiles': smiles, 'label': label} if label else {'smiles': smiles}
+                        for smiles, label in zip(template_products, template_product_labels)]
+        })
+    
+    # 2. 处理 reactions 字典（从 '1_1' 开始编号）
+    if 'reactions' in data:
+        reactions_dict = data['reactions']
+        # 按 key 排序以确保顺序一致
+        sorted_reaction_keys = sorted(reactions_dict.keys())
+        
+        for idx, reaction_key in enumerate(sorted_reaction_keys, start=1):
+            reaction_data = reactions_dict[reaction_key]
+            reaction_reactants = reaction_data.get('reactants', [])
+            reaction_products = reaction_data.get('products', [])
+            
+            # 提取 conditions：从 original_molecule_list 中通过 product SMILES 和 label 匹配
+            conditions = []
+            for product_smiles in reaction_products:
+                # 在 original_molecule_list 中查找匹配的条目
+                if product_smiles in original_molecule_list:
+                    info = original_molecule_list[product_smiles]
+                    if isinstance(info, list) and len(info) > 0:
+                        # info 格式: ['20', '8 h, 87% yield', 'product', 'bbox_id=14', 'id=15']
+                        # 需要找到 label 匹配的条目（info[0] 是 label）
+                        info_label = str(info[0]) if info[0] else None
+                        if info_label == str(reaction_key):
+                            # 提取条件信息（跳过 label(索引0), 'product'/'reactant'/'template', bbox_id=, id=）
+                            for item in info[1:]:
+                                if item and isinstance(item, str):
+                                    # 跳过固定关键词和 bbox_id=、id= 开头的项
+                                    if item not in ['product', 'reactant', 'template'] and not item.startswith('bbox_id=') and not item.startswith('id='):
+                                        if item not in conditions:  # 避免重复
+                                            conditions.append(item)
+            
+            # 构建标准化格式
+            normalized_reaction = {
+                'reaction_id': f'{idx}_1',
+                'reactants': [{'smiles': smiles} for smiles in reaction_reactants],
+                'conditions': conditions if conditions else [],
+                'products': [{'smiles': smiles, 'label': reaction_key} for smiles in reaction_products]
+            }
+            normalized_reactions.append(normalized_reaction)
+    
+    return {
+        'reactions': normalized_reactions,
+        'original_molecule_list': original_molecule_list
+    }
 
 
 def retry_api_call(func, max_retries=3, base_delay=2, backoff_factor=2, *args, **kwargs):
@@ -1063,6 +1146,7 @@ def process_reaction_image_with_product_variant_R_group(image_path: str) -> dict
 # 按标签排序
     sorted_keys = sorted(toadd["reactions"].keys())
     toadd["reactions"] = {i: toadd["reactions"][i] for i in sorted_keys}
+    toadd = normalize_product_variant_output(toadd)
     print(f"str_R_group_agent_output:{toadd}")
     return toadd
 
@@ -1352,6 +1436,7 @@ def process_reaction_image_with_product_variant_R_group_OS(
     # 按标签排序
     sorted_keys = sorted(toadd["reactions"].keys())
     toadd["reactions"] = {i: toadd["reactions"][i] for i in sorted_keys}
+    toadd = normalize_product_variant_output(toadd)
     print(f"str_R_group_agent_output:{toadd}")
     return toadd
 
