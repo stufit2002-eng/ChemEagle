@@ -142,7 +142,7 @@ vllm serve /path/to/Qwen3-VL-32B-Instruct-AWQ \
 ```powershell
 docker run -d --gpus all `
     -p 8000:8000 `
-    -v F:/chemeagle/Qwen3-VL-32B-Instruct-AWQ:/models/Qwen3-VL-32B-Instruct-AWQ `
+    -v /path/to/Qwen3-VL-32B-Instruct-AWQ:/models/Qwen3-VL-32B-Instruct-AWQ `
     --name vllm-server `
     vllm/vllm-openai:latest `
     --model /models/Qwen3-VL-32B-Instruct-AWQ `
@@ -198,7 +198,7 @@ Benchmark datasets, predictions, and ground truth can be found in our [Huggingfa
 
 ## 🤗 Chemical information extraction using [ChemEAGLE.Web](https://app.chemeagle.net/) 
 
-Go to our [ChemEAGLE.Web app demo](https://app.chemeagle.net/) to directly use our tool online! (Note: The web demo only supports graphic input now.)
+Go to our [ChemEAGLE.Web app demo](https://app.chemeagle.net/) to directly use our tool online! (Use for both image and PDF input)
 
 When the input is a multimodal chemical reaction graphic:
 ![visualization](examples/reaction9.png)
