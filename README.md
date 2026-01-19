@@ -111,7 +111,7 @@ print(results)
 
 ##### Prerequisites
 - NVIDIA GPU with CUDA support (recommended)
-- Docker installed (for vLLM deployment)
+- Docker installed (for Windows vLLM deployment)
 - Download the Qwen3-VL model weights (e.g., `Qwen3-VL-32B-Instruct-AWQ`) from [HuggingFace](https://huggingface.co/QuantTrio/Qwen3-VL-32B-Instruct-AWQ)
 
 1. Setup Python Environment
@@ -126,20 +126,15 @@ pip install -r requirements.txt
 3. Deploy vLLM Server
 
 **For Linux:**
-
-```bash
-docker run -d --gpus all \
-    -p 8000:8000 \
-    -v /path/to/Qwen3-VL-32B-Instruct-AWQ:/models/Qwen3-VL-32B-Instruct-AWQ \
-    --name vllm-server \
-    vllm/vllm-openai:latest \
-    --model /models/Qwen3-VL-32B-Instruct-AWQ \
+```
+pip install vllm
+vllm serve /path/to/Qwen3-VL-32B-Instruct-AWQ \
     --port 8000 \
     --trust-remote-code \
     --enable-auto-tool-choice \
     --tool-call-parser hermes \
     --max-model-len 27200 \
-    --limit-mm-per-prompt.video 0
+    --limit-mm-per-prompt video=0
 ```
 
 **For Windows (PowerShell):**
