@@ -9,7 +9,7 @@ from PIL import Image
 import json
 import os
 import sys
-from rxnim import RxnScribe
+from rxnim import RxnIM
 import json
 import base64
 import re
