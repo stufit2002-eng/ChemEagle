@@ -45,8 +45,8 @@ def _normalize_tool_args(raw_args: Optional[dict], image_path: str) -> dict:
 def ChemEagle(
     image_path: str,
     *,
-    use_plan_observer: bool = False,
-    use_action_observer: bool = False,
+    use_plan_observer: bool = True,
+    use_action_observer: bool = True,
 ) -> dict:
     """
     """
