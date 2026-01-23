@@ -274,7 +274,7 @@ def ChemEagle(
     for idx, plan_item in enumerate(plan_to_execute):
         tool_name = plan_item.get("name") or plan_item.get("tool_name")
         if not tool_name:
-            print(f"⚠️ 警告: plan_item {idx} 缺少 name 字段，跳过: {plan_item}")
+            print(f"warning: plan_item {idx} no name ，skip: {plan_item}")
             continue
         
         tool_call_id = plan_item.get("id") or f"observer_call_{idx}"
@@ -498,7 +498,7 @@ def ChemEagle_OS(
     for idx, plan_item in enumerate(plan_to_execute):
         tool_name = plan_item.get("name") or plan_item.get("tool_name")
         if not tool_name:
-            print(f"⚠️ 警告: plan_item {idx} 缺少 name 字段，跳过: {plan_item}")
+            print(f"warning: plan_item {idx} no name ，skip: {plan_item}")
             continue
         
         tool_call_id = plan_item.get("id") or f"observer_call_{idx}"
@@ -519,7 +519,7 @@ def ChemEagle_OS(
 
         # 确保 tool_name 不为空（OpenAI 兼容 API 标准要求）
         if not tool_name or not tool_name.strip():
-            print(f"⚠️ 警告: tool_name 为空，跳过工具响应")
+            print(f"warning: tool_name is empty，skip")
             continue
             
         results.append({
