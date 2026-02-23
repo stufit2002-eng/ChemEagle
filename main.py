@@ -606,4 +606,56 @@ def ChemEagle_OS(
 
 
 if __name__ == "__main__":
-    model = ChemEagle()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run ChemEagle on a reaction image.")
+    parser.add_argument(
+        "--image",
+        default="examples/reaction1.jpg",
+        help="Path to the reaction image (default: examples/reaction1.jpg)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["azure", "os", "both"],
+        default="both",
+        help="Which version to run: 'azure' (AzureOpenAI), 'os' (open-source vLLM), or 'both' (default: both)",
+    )
+    parser.add_argument(
+        "--model",
+        default="/models/Qwen3-VL-32B-Instruct-AWQ",
+        help="Model name for the OS (vLLM/Ollama) backend (default: /models/Qwen3-VL-32B-Instruct-AWQ)",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Base URL for the OS backend, e.g. http://localhost:8000/v1 (overrides VLLM_BASE_URL env var)",
+    )
+    args = parser.parse_args()
+
+    print(f"\n{'='*60}")
+    print(f"  ChemEagle – sample run")
+    print(f"  Image : {args.image}")
+    print(f"  Mode  : {args.mode}")
+    print(f"{'='*60}\n")
+
+    if args.mode in ("azure", "both"):
+        print("[Azure] Running ChemEagle (AzureOpenAI) ...")
+        try:
+            azure_result = ChemEagle(args.image)
+            print("[Azure] Result:")
+            print(json.dumps(azure_result, indent=2, ensure_ascii=False))
+        except Exception as e:
+            print(f"[Azure] ERROR: {e}")
+
+    if args.mode in ("os", "both"):
+        print("\n[OS] Running ChemEagle_OS (open-source vLLM/Ollama) ...")
+        try:
+            os_result = ChemEagle_OS(
+                args.image,
+                model_name=args.model,
+                base_url=args.base_url,
+            )
+            print("[OS] Result:")
+            print(json.dumps(os_result, indent=2, ensure_ascii=False))
+        except Exception as e:
+            print(f"[OS] ERROR: {e}")
