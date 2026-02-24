@@ -59,11 +59,11 @@ If the plan is acceptable, return the original plan as-is.
 If adjustments are required, provide the improved list of agents and briefly explain the changes.
 
 Always respond in valid JSON with the structure:
-{
+{{
   "list_of_agents": [...],   // final list of agent calls
   "redo": true/false,
   "reason": "If changed is true, give an explanation; otherwise leave blank."
-}
+}}
 
 Current plan (JSON):
 {plan_json}
