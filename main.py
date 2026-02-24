@@ -32,6 +32,41 @@ if not API_KEY:
 AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
 API_VERSION = os.getenv("API_VERSION")
 
+# Maps observer-returned agent names (display names / snake_case variants)
+# back to the real function names registered in TOOL_MAP.
+# None means the agent has no implementation yet — skip it silently.
+_AGENT_NAME_TO_TOOL: dict = {
+    # Reaction template parsing agent
+    "reaction_template_parsing_agent":              "get_full_reaction_template",
+    "reaction template parsing agent":              "get_full_reaction_template",
+    # Molecular recognition agent
+    "molecular_recognition_agent":                  "get_multi_molecular_full",
+    "molecular recognition agent":                  "get_multi_molecular_full",
+    # Structure-based R-group substitution agent
+    "structure-based_r-group_substitution_agent":   "process_reaction_image_with_product_variant_R_group",
+    "structure_based_r_group_substitution_agent":   "process_reaction_image_with_product_variant_R_group",
+    "structure-based r-group substitution agent":   "process_reaction_image_with_product_variant_R_group",
+    # Text-based R-group substitution agent
+    "text-based_r-group_substitution_agent":        "process_reaction_image_with_table_R_group",
+    "text_based_r_group_substitution_agent":        "process_reaction_image_with_table_R_group",
+    "text-based r-group substitution agent":        "process_reaction_image_with_table_R_group",
+    # Text extraction agent
+    "text_extraction_agent":                        "text_extraction_agent",
+    "text extraction agent":                        "text_extraction_agent",
+    # Condition interpretation agent — not yet implemented, skip
+    "condition_interpretation_agent":               None,
+    "condition interpretation agent":               None,
+}
+
+
+def _resolve_tool_name(raw_name: str) -> str | None:
+    """Return the TOOL_MAP key for *raw_name*, or None if it should be skipped."""
+    lower = raw_name.lower().strip()
+    if lower in _AGENT_NAME_TO_TOOL:
+        return _AGENT_NAME_TO_TOOL[lower]
+    return raw_name  # already a real function name — pass through unchanged
+
+
 def _normalize_tool_args(raw_args: Optional[dict], image_path: str) -> dict:
     if not isinstance(raw_args, dict):
         return {"image_path": image_path}
@@ -276,7 +311,11 @@ def ChemEagle(
         if not tool_name:
             print(f"warning: plan_item {idx} no name ，skip: {plan_item}")
             continue
-        
+        tool_name = _resolve_tool_name(tool_name)
+        if tool_name is None:
+            print(f"[D] Skipping unimplemented agent: {plan_item.get('name') or plan_item.get('tool_name')}")
+            continue
+
         tool_call_id = plan_item.get("id") or f"observer_call_{idx}"
         tool_args = _normalize_tool_args(plan_item.get("arguments", {}), image_path)
 
@@ -500,7 +539,11 @@ def ChemEagle_OS(
         if not tool_name:
             print(f"warning: plan_item {idx} no name ，skip: {plan_item}")
             continue
-        
+        tool_name = _resolve_tool_name(tool_name)
+        if tool_name is None:
+            print(f"[OS_D] Skipping unimplemented agent: {plan_item.get('name') or plan_item.get('tool_name')}")
+            continue
+
         tool_call_id = plan_item.get("id") or f"observer_call_{idx}"
         tool_args = _normalize_tool_args(plan_item.get("arguments", {}), image_path)
 
