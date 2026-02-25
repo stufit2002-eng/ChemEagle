@@ -350,49 +350,45 @@ def ChemEagle(
             "execution_logs": execution_logs,
         }
 
-    # Prepare the chat completion payload
-    # 构建 assistant 消息，包含 planner 的输出和工具调用信息
-    executed_tools = [selected_tool]
-    if has_text_extraction:
-        executed_tools.append("text_extraction_agent")
-    assistant_message = {
-        "role": "assistant",
-        "content": f"Selected agents: {', '.join(agent_list)}\nExecuted tools: {', '.join(executed_tools)}"
-    }
-    
-    completion_payload = {
-        'model': 'gpt-5-mini',
-        'messages': [
-            {'role': 'system', 'content': 'You are a helpful assistant.'},
-            {
-                'role': 'user',
-                'content': [
-                    {
-                        'type': 'text',
-                        'text': prompt
-                    },
-                    {
-                        'type': 'image_url',
-                        'image_url': {
-                            'url': f'data:image/png;base64,{base64_image}'
-                        }
-                    }
-                ]
-            },
-            assistant_message,
-            *results
-            ],
-    }
+    # Serialize tool results as plain text to avoid malformed tool-message conversation
+    # structure (tool messages require a preceding assistant message with tool_calls).
+    # Also avoids response_format=json_object which can implicitly force temperature=0,
+    # which is rejected by o-series / gpt-5-mini models.
+    tool_results_text = "\n\n".join([
+        f"Tool: {log['name']}\nResult: {json.dumps(log['result'], ensure_ascii=False)}"
+        for log in execution_logs
+    ])
 
-    # Generate new response
+    final_messages = [
+        {'role': 'system', 'content': 'You are a helpful assistant.'},
+        {
+            'role': 'user',
+            'content': [
+                {'type': 'text', 'text': prompt + "\n\nTool Results:\n" + tool_results_text},
+                {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{base64_image}'}}
+            ]
+        }
+    ]
+
+    # Generate new response (no response_format to avoid implicit temperature=0)
     response = client.chat.completions.create(
-        model=completion_payload["model"],
-        messages=completion_payload["messages"],
-        response_format={ 'type': 'json_object' },
+        model='gpt-5-mini',
+        messages=final_messages,
     )
 
-    # 获取 GPT 生成的结果
-    gpt_output = json.loads(response.choices[0].message.content)
+    # Parse JSON from response (with fallback for reasoning-model text wrapping)
+    from get_R_group_sub_agent import extract_json_from_text_with_reasoning
+    raw_content = response.choices[0].message.content
+    try:
+        gpt_output = json.loads(raw_content)
+        print("DEBUG [Azure]: Successfully parsed JSON directly")
+    except json.JSONDecodeError:
+        print("WARNING [Azure]: Direct JSON parsing failed, trying to extract JSON from text...")
+        gpt_output = extract_json_from_text_with_reasoning(raw_content)
+        if gpt_output is None:
+            print(f"ERROR [Azure]: Failed to parse JSON from model response")
+            print(f"Raw content (last 2000 chars):\n{raw_content[-2000:]}")
+            return {"content": raw_content, "parsed": False}
     print(gpt_output)
     return gpt_output
 
