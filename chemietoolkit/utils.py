@@ -532,7 +532,7 @@ def backout(results, coref_results, molnextr):
         if len(products) == 1:
             if products[0] not in coref_results_dict:
                 print("Warning: No Label Parsed")
-                return
+                return toreturn
             product_labels = coref_results_dict[products[0]]
             prod = products[0]
             label_idx = product_labels[0]
@@ -542,17 +542,17 @@ def backout(results, coref_results, molnextr):
                 label_idx = product_labels[0]
             else:
                 print("Warning: Malformed Label Parsed.")
-                return
+                return toreturn
             '''
         else:
             print("Warning: More than one product detected")
-            return
-        
+            return toreturn
+
         # format the regular expression for labels that correspond to the product label
         numbers = re.findall(r'\d+', label_idx)
         label_idx = numbers[0] if len(numbers) > 0 else ""
         label_pattern = rf'{re.escape(label_idx)}[a-zA-Z]+'
-        
+
 
         prod_smiles = prod
         prod_mol = Chem.MolFromMolBlock(results[0]['reactions'][0]['products'][0]['molfile'])
@@ -755,7 +755,7 @@ def backout_without_coref(results, coref_results, coref_results_dict, coref_smil
         if len(products) == 1:
             if products[0] not in coref_results_dict:
                 print("Warning: No Label Parsed")
-                return
+                return toreturn
             product_labels = coref_results_dict[products[0]]
             prod = products[0]
             label_idx = product_labels[0]
@@ -765,17 +765,17 @@ def backout_without_coref(results, coref_results, coref_results_dict, coref_smil
                 label_idx = product_labels[0]
             else:
                 print("Warning: Malformed Label Parsed.")
-                return
+                return toreturn
             '''
         else:
             print("Warning: More than one product detected")
-            return
-        
+            return toreturn
+
         # format the regular expression for labels that correspond to the product label
         numbers = re.findall(r'\d+', label_idx)
         label_idx = numbers[0] if len(numbers) > 0 else ""
         label_pattern = rf'{re.escape(label_idx)}[a-zA-Z]+'
-        
+
 
         prod_smiles = prod
         prod_mol = Chem.MolFromMolBlock(results[0]['reactions'][0]['products'][0]['molfile'])
