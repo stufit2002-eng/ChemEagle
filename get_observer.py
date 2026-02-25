@@ -79,10 +79,10 @@ If the outcome is acceptable, return redo=false.
 If issues are found or corrections are needed, return redo=true with a short explanation.
 
 Always respond in valid JSON with the structure:
-{
+{{
   "redo": true/false,
   "reason": "Provide the reasons when redo is true; otherwise leave blank."
-}
+}}
 
 Current agent_result (JSON):
 {result_json}

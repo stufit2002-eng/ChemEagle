@@ -348,12 +348,12 @@ Here is my step-by-step analysis:
     ]
 
     # First API call: let GPT decide which tools to invoke
+    # Note: response_format=json_object is omitted — on o-series/gpt-5-mini it
+    # internally enforces temperature=0 which those models reject (HTTP 400).
     response1 = client.chat.completions.create(
         model="gpt-5-mini",
         messages=messages,
         tools=tools,
-        #temperature=0,
-        response_format={"type": "json_object"}
     )
 
     # Get assistant message with tool calls
@@ -392,11 +392,16 @@ Here is my step-by-step analysis:
     response2 = client.chat.completions.create(
         model="gpt-5-mini",
         messages=messages,
-        #   temperature=0,
-        response_format={"type": "json_object"}
     )
 
-    return json.loads(response2.choices[0].message.content)
+    # Parse JSON with fallback (response_format removed to avoid implicit temperature=0)
+    from get_R_group_sub_agent import extract_json_from_text_with_reasoning
+    raw2 = response2.choices[0].message.content or ""
+    try:
+        return json.loads(raw2)
+    except json.JSONDecodeError:
+        result = extract_json_from_text_with_reasoning(raw2)
+        return result if result is not None else {"content": raw2}
 
 
 def retry_api_call(func, max_retries=3, base_delay=2, backoff_factor=2, *args, **kwargs):
