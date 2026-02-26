@@ -32,6 +32,47 @@ if not API_KEY:
 AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
 API_VERSION = os.getenv("API_VERSION")
 
+# Maps observer-returned agent names (display names / snake_case variants)
+# back to the real function names registered in TOOL_MAP.
+# None means the agent has no implementation yet — skip it silently.
+_AGENT_NAME_TO_TOOL: dict = {
+    # Reaction template parsing agent
+    "reaction_template_parsing_agent":              "get_full_reaction_template",
+    "reaction template parsing agent":              "get_full_reaction_template",
+    # Molecular recognition agent
+    "molecular_recognition_agent":                  "get_multi_molecular_full",
+    "molecular recognition agent":                  "get_multi_molecular_full",
+    # Structure-based R-group substitution agent
+    "structure-based_r-group_substitution_agent":   "process_reaction_image_with_product_variant_R_group",
+    "structure_based_r_group_substitution_agent":   "process_reaction_image_with_product_variant_R_group",
+    "structure-based r-group substitution agent":   "process_reaction_image_with_product_variant_R_group",
+    # Text-based R-group substitution agent
+    "text-based_r-group_substitution_agent":        "process_reaction_image_with_table_R_group",
+    "text_based_r_group_substitution_agent":        "process_reaction_image_with_table_R_group",
+    "text-based r-group substitution agent":        "process_reaction_image_with_table_R_group",
+    # Text extraction agent
+    "text_extraction_agent":                        "text_extraction_agent",
+    "text extraction agent":                        "text_extraction_agent",
+    # Condition interpretation agent — not yet implemented, skip
+    "condition_interpretation_agent":               None,
+    "condition interpretation agent":               None,
+}
+
+
+def _resolve_tool_name(raw_name: str) -> str | None:
+    """Return the TOOL_MAP key for *raw_name*, or None if it should be skipped."""
+    lower = raw_name.lower().strip()
+    if lower in _AGENT_NAME_TO_TOOL:
+        return _AGENT_NAME_TO_TOOL[lower]
+    # Normalize hyphens to underscores (observer may return mixed forms like
+    # "structure_based_r-group_substitution_agent" which only matches when
+    # the hyphen in "r-group" is also converted to an underscore).
+    normalized = lower.replace("-", "_")
+    if normalized in _AGENT_NAME_TO_TOOL:
+        return _AGENT_NAME_TO_TOOL[normalized]
+    return raw_name  # already a real function name — pass through unchanged
+
+
 def _normalize_tool_args(raw_args: Optional[dict], image_path: str) -> dict:
     if not isinstance(raw_args, dict):
         return {"image_path": image_path}
@@ -276,7 +317,11 @@ def ChemEagle(
         if not tool_name:
             print(f"warning: plan_item {idx} no name ，skip: {plan_item}")
             continue
-        
+        tool_name = _resolve_tool_name(tool_name)
+        if tool_name is None:
+            print(f"[D] Skipping unimplemented agent: {plan_item.get('name') or plan_item.get('tool_name')}")
+            continue
+
         tool_call_id = plan_item.get("id") or f"observer_call_{idx}"
         tool_args = _normalize_tool_args(plan_item.get("arguments", {}), image_path)
 
@@ -303,57 +348,61 @@ def ChemEagle(
             'tool_call_id': tool_call_id,
         })
 
-    # Action Observer: 检查执行结果，如果失败则重新执行
-    if use_action_observer and action_observer_agent(image_path, execution_logs):
-        return {
-            "redo": True,
-            "plan": plan_to_execute,
-            "execution_logs": execution_logs,
+    # Action Observer: 检查执行结果（非阻塞）
+    # The observer's opinion is logged but the pipeline always proceeds to
+    # final compilation — returning early on redo=True would skip synthesis.
+    if use_action_observer:
+        redo_suggested = action_observer_agent(image_path, execution_logs)
+        if redo_suggested:
+            print("[Azure] WARNING: action_observer suggested redo=True, but proceeding to final compilation anyway.")
+
+    # Serialize tool results as plain text to avoid malformed tool-message conversation
+    # structure (tool messages require a preceding assistant message with tool_calls).
+    # Also avoids response_format=json_object which can implicitly force temperature=0,
+    # which is rejected by o-series / gpt-5-mini models.
+    tool_results_text = "\n\n".join([
+        f"Tool: {log['name']}\nResult: {json.dumps(log['result'], ensure_ascii=False)}"
+        for log in execution_logs
+    ])
+
+    final_messages = [
+        {'role': 'system', 'content': 'You are a helpful assistant.'},
+        {
+            'role': 'user',
+            'content': [
+                {'type': 'text', 'text': prompt + "\n\nTool Results:\n" + tool_results_text},
+                {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{base64_image}'}}
+            ]
         }
+    ]
 
-    # Prepare the chat completion payload
-    # 构建 assistant 消息，包含 planner 的输出和工具调用信息
-    executed_tools = [selected_tool]
-    if has_text_extraction:
-        executed_tools.append("text_extraction_agent")
-    assistant_message = {
-        "role": "assistant",
-        "content": f"Selected agents: {', '.join(agent_list)}\nExecuted tools: {', '.join(executed_tools)}"
-    }
-    
-    completion_payload = {
-        'model': 'gpt-5-mini',
-        'messages': [
-            {'role': 'system', 'content': 'You are a helpful assistant.'},
-            {
-                'role': 'user',
-                'content': [
-                    {
-                        'type': 'text',
-                        'text': prompt
-                    },
-                    {
-                        'type': 'image_url',
-                        'image_url': {
-                            'url': f'data:image/png;base64,{base64_image}'
-                        }
-                    }
-                ]
-            },
-            assistant_message,
-            *results
-            ],
-    }
-
-    # Generate new response
+    # Generate new response (no response_format to avoid implicit temperature=0)
     response = client.chat.completions.create(
-        model=completion_payload["model"],
-        messages=completion_payload["messages"],
-        response_format={ 'type': 'json_object' },
+        model='gpt-5-mini',
+        messages=final_messages,
     )
 
-    # 获取 GPT 生成的结果
-    gpt_output = json.loads(response.choices[0].message.content)
+    # Parse JSON from response (with fallback for reasoning-model text wrapping)
+    from get_R_group_sub_agent import extract_json_from_text_with_reasoning
+    raw_content = response.choices[0].message.content
+    try:
+        gpt_output = json.loads(raw_content)
+        print("DEBUG [Azure]: Successfully parsed JSON directly")
+    except json.JSONDecodeError:
+        print("WARNING [Azure]: Direct JSON parsing failed, trying to extract JSON from text...")
+        # "Extra data" case: valid JSON followed by trailing non-JSON text
+        try:
+            gpt_output, _ = json.JSONDecoder().raw_decode(raw_content.lstrip())
+            print("DEBUG [Azure]: Successfully parsed JSON with raw_decode")
+        except json.JSONDecodeError:
+            try:
+                gpt_output = extract_json_from_text_with_reasoning(raw_content)
+            except Exception:
+                gpt_output = None
+        if gpt_output is None:
+            print(f"ERROR [Azure]: Failed to parse JSON from model response")
+            print(f"Raw content (last 2000 chars):\n{raw_content[-2000:]}")
+            return {"content": raw_content, "parsed": False}
     print(gpt_output)
     return gpt_output
 
@@ -500,7 +549,11 @@ def ChemEagle_OS(
         if not tool_name:
             print(f"warning: plan_item {idx} no name ，skip: {plan_item}")
             continue
-        
+        tool_name = _resolve_tool_name(tool_name)
+        if tool_name is None:
+            print(f"[OS_D] Skipping unimplemented agent: {plan_item.get('name') or plan_item.get('tool_name')}")
+            continue
+
         tool_call_id = plan_item.get("id") or f"observer_call_{idx}"
         tool_args = _normalize_tool_args(plan_item.get("arguments", {}), image_path)
 
@@ -534,13 +587,13 @@ def ChemEagle_OS(
     
     print(f'[OS_D] results: {results}')
     
-    # Action Observer: 检查执行结果，如果失败则重新执行
-    if use_action_observer and action_observer_agent_OS(image_path, execution_logs):
-        return {
-            "redo": True,
-            "plan": plan_to_execute,
-            "execution_logs": execution_logs,
-        }
+    # Action Observer: 检查执行结果（非阻塞）
+    # The observer's opinion is logged but the pipeline always proceeds to
+    # final compilation — returning early on redo=True would skip synthesis.
+    if use_action_observer:
+        redo_suggested = action_observer_agent_OS(image_path, execution_logs)
+        if redo_suggested:
+            print("[OS] WARNING: action_observer suggested redo=True, but proceeding to final compilation anyway.")
 
     # Prepare the chat completion payload
     # 构建 assistant 消息，包含 planner 的输出和工具调用信息
@@ -606,4 +659,56 @@ def ChemEagle_OS(
 
 
 if __name__ == "__main__":
-    model = ChemEagle()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run ChemEagle on a reaction image.")
+    parser.add_argument(
+        "--image",
+        default="examples/reaction1.jpg",
+        help="Path to the reaction image (default: examples/reaction1.jpg)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["azure", "os", "both"],
+        default="both",
+        help="Which version to run: 'azure' (AzureOpenAI), 'os' (open-source vLLM), or 'both' (default: both)",
+    )
+    parser.add_argument(
+        "--model",
+        default="/models/Qwen3-VL-32B-Instruct-AWQ",
+        help="Model name for the OS (vLLM/Ollama) backend (default: /models/Qwen3-VL-32B-Instruct-AWQ)",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Base URL for the OS backend, e.g. http://localhost:8000/v1 (overrides VLLM_BASE_URL env var)",
+    )
+    args = parser.parse_args()
+
+    print(f"\n{'='*60}")
+    print(f"  ChemEagle – sample run")
+    print(f"  Image : {args.image}")
+    print(f"  Mode  : {args.mode}")
+    print(f"{'='*60}\n")
+
+    if args.mode in ("azure", "both"):
+        print("[Azure] Running ChemEagle (AzureOpenAI) ...")
+        try:
+            azure_result = ChemEagle(args.image)
+            print("[Azure] Result:")
+            print(json.dumps(azure_result, indent=2, ensure_ascii=False))
+        except Exception as e:
+            print(f"[Azure] ERROR: {e}")
+
+    if args.mode in ("os", "both"):
+        print("\n[OS] Running ChemEagle_OS (open-source vLLM/Ollama) ...")
+        try:
+            os_result = ChemEagle_OS(
+                args.image,
+                model_name=args.model,
+                base_url=args.base_url,
+            )
+            print("[OS] Result:")
+            print(json.dumps(os_result, indent=2, ensure_ascii=False))
+        except Exception as e:
+            print(f"[OS] ERROR: {e}")

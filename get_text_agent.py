@@ -28,26 +28,38 @@ API_VERSION = os.getenv("API_VERSION")
 
 def configure_tesseract():
     """自动检测并配置 Tesseract OCR 可执行文件路径"""
+    import sys
+
     # 如果已经配置过，直接返回
     if hasattr(pytesseract.pytesseract, 'tesseract_cmd') and pytesseract.pytesseract.tesseract_cmd:
         if os.path.exists(pytesseract.pytesseract.tesseract_cmd):
             return
-    
-    # 常见的 Windows 安装路径（包括项目目录下的自定义路径）
+
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    possible_paths = [
-        # 用户指定的绝对路径（最高优先级）
+
+    is_windows = sys.platform == "win32"
+
+    # Linux / macOS paths (ignored on Windows)
+    linux_paths = [
+        "/usr/bin/tesseract",
+        "/usr/local/bin/tesseract",
+        "/opt/homebrew/bin/tesseract",
+        "/opt/local/bin/tesseract",
+    ]
+
+    # Windows paths (ignored on Linux/macOS)
+    windows_paths = [
         r"F:\chemeagle\Tesseract-OCR\tesseract.exe",
-        # 项目目录下的自定义路径
         os.path.join(script_dir, "Tesseract-OCR", "tesseract.exe"),
         os.path.join(os.path.dirname(script_dir), "Tesseract-OCR", "tesseract.exe"),
-        # 标准安装路径
         r"C:\Program Files\Tesseract-OCR\tesseract.exe",
         r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
         os.path.expanduser(r"~\AppData\Local\Tesseract-OCR\tesseract.exe"),
         r"C:\Users\Administrator\AppData\Local\Tesseract-OCR\tesseract.exe",
     ]
-    
+
+    possible_paths = windows_paths if is_windows else linux_paths
+
     # 首先尝试从 PATH 中查找
     try:
         tesseract_cmd = shutil.which("tesseract")
@@ -57,16 +69,15 @@ def configure_tesseract():
             return
     except Exception:
         pass
-    
+
     # 如果 PATH 中没有，尝试常见路径
     for path in possible_paths:
-        # 规范化路径
         normalized_path = os.path.normpath(path)
         if os.path.exists(normalized_path):
             pytesseract.pytesseract.tesseract_cmd = normalized_path
             print(f"✓ 找到 Tesseract: {normalized_path}")
             return
-    
+
     # 如果都没找到，提示用户
     print("⚠️  警告: 未找到 Tesseract OCR 可执行文件")
     print("已尝试的路径:")
@@ -76,8 +87,12 @@ def configure_tesseract():
         print(f"  {exists} {normalized_path}")
     print("\n请执行以下步骤之一:")
     print("1. 确保 Tesseract OCR 已正确安装")
-    print("2. 或者手动设置路径:")
-    print("   pytesseract.pytesseract.tesseract_cmd = r'F:\\chemeagle\\Tesseract-OCR\\tesseract.exe'")
+    if is_windows:
+        print("2. 或者手动设置路径:")
+        print("   pytesseract.pytesseract.tesseract_cmd = r'F:\\chemeagle\\Tesseract-OCR\\tesseract.exe'")
+    else:
+        print("2. Linux: sudo apt-get install tesseract-ocr")
+        print("   macOS: brew install tesseract")
     raise FileNotFoundError(
         "Tesseract OCR 未安装或不在 PATH 中。"
         "请访问 https://github.com/UB-Mannheim/tesseract/wiki 下载安装。"
@@ -333,12 +348,12 @@ Here is my step-by-step analysis:
     ]
 
     # First API call: let GPT decide which tools to invoke
+    # Note: response_format=json_object is omitted — on o-series/gpt-5-mini it
+    # internally enforces temperature=0 which those models reject (HTTP 400).
     response1 = client.chat.completions.create(
         model="gpt-5-mini",
         messages=messages,
         tools=tools,
-        #temperature=0,
-        response_format={"type": "json_object"}
     )
 
     # Get assistant message with tool calls
@@ -347,8 +362,24 @@ Here is my step-by-step analysis:
     # Execute each requested tool
     tool_calls = assistant_message.tool_calls
     if not tool_calls:
-        # If no tool calls, return the response directly
-        return json.loads(response1.choices[0].message.content) if response1.choices[0].message.content else {}
+        # If no tool calls, parse response with the same robust fallback
+        raw_content1 = response1.choices[0].message.content or ""
+        if not raw_content1:
+            return {}
+        from get_R_group_sub_agent import extract_json_from_text_with_reasoning
+        try:
+            return json.loads(raw_content1)
+        except json.JSONDecodeError:
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(raw_content1.lstrip())
+                return obj
+            except json.JSONDecodeError:
+                pass
+            try:
+                result = extract_json_from_text_with_reasoning(raw_content1)
+            except Exception:
+                result = None
+            return result if result is not None else {"content": raw_content1}
     
     tool_results_msgs = []
     for call in tool_calls:
@@ -377,11 +408,26 @@ Here is my step-by-step analysis:
     response2 = client.chat.completions.create(
         model="gpt-5-mini",
         messages=messages,
-        #   temperature=0,
-        response_format={"type": "json_object"}
     )
 
-    return json.loads(response2.choices[0].message.content)
+    # Parse JSON with fallback (response_format removed to avoid implicit temperature=0)
+    from get_R_group_sub_agent import extract_json_from_text_with_reasoning
+    raw2 = response2.choices[0].message.content or ""
+    try:
+        return json.loads(raw2)
+    except json.JSONDecodeError:
+        # "Extra data" case: valid JSON followed by trailing non-JSON text
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(raw2.lstrip())
+            return obj
+        except json.JSONDecodeError:
+            pass
+        # JSON embedded inside reasoning/explanatory text
+        try:
+            result = extract_json_from_text_with_reasoning(raw2)
+        except Exception:
+            result = None
+        return result if result is not None else {"content": raw2}
 
 
 def retry_api_call(func, max_retries=3, base_delay=2, backoff_factor=2, *args, **kwargs):
