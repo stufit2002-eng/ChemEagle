@@ -352,9 +352,12 @@ def ChemEagle(
     # The observer's opinion is logged but the pipeline always proceeds to
     # final compilation — returning early on redo=True would skip synthesis.
     if use_action_observer:
-        redo_suggested = action_observer_agent(image_path, execution_logs)
-        if redo_suggested:
-            print("[Azure] WARNING: action_observer suggested redo=True, but proceeding to final compilation anyway.")
+        try:
+            redo_suggested = action_observer_agent(image_path, execution_logs)
+            if redo_suggested:
+                print("[Azure] WARNING: action_observer suggested redo=True, but proceeding to final compilation anyway.")
+        except Exception as obs_err:
+            print(f"[Azure] WARNING: action_observer failed ({obs_err}), proceeding anyway.")
 
     # Serialize tool results as plain text to avoid malformed tool-message conversation
     # structure (tool messages require a preceding assistant message with tool_calls).
@@ -591,9 +594,12 @@ def ChemEagle_OS(
     # The observer's opinion is logged but the pipeline always proceeds to
     # final compilation — returning early on redo=True would skip synthesis.
     if use_action_observer:
-        redo_suggested = action_observer_agent_OS(image_path, execution_logs)
-        if redo_suggested:
-            print("[OS] WARNING: action_observer suggested redo=True, but proceeding to final compilation anyway.")
+        try:
+            redo_suggested = action_observer_agent_OS(image_path, execution_logs)
+            if redo_suggested:
+                print("[OS] WARNING: action_observer suggested redo=True, but proceeding to final compilation anyway.")
+        except Exception as obs_err:
+            print(f"[OS] WARNING: action_observer failed ({obs_err}), proceeding anyway.")
 
     # Prepare the chat completion payload
     # 构建 assistant 消息，包含 planner 的输出和工具调用信息

@@ -118,14 +118,19 @@ def plan_observer_agent(image_path: str, tool_calls: List[Any]) -> List[Any]:
         
         response = client.chat.completions.create(
             model="gpt-5-mini",
-            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": user_content},
             ],
         )
-        content = response.choices[0].message.content
-        parsed = json.loads(content)
+        content = response.choices[0].message.content or ""
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            try:
+                parsed, _ = json.JSONDecoder().raw_decode(content.lstrip())
+            except json.JSONDecodeError:
+                parsed = {}
         # Support both "plan" and "list_of_agents" keys for compatibility
         return parsed.get("list_of_agents", parsed.get("plan", tool_calls))
     except Exception:
@@ -154,14 +159,19 @@ def action_observer_agent(image_path: str, tool_result: Any) -> bool:
         
         response = client.chat.completions.create(
             model="gpt-5-mini",
-            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": user_content},
             ],
         )
-        content = response.choices[0].message.content
-        parsed = json.loads(content)
+        content = response.choices[0].message.content or ""
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            try:
+                parsed, _ = json.JSONDecoder().raw_decode(content.lstrip())
+            except json.JSONDecodeError:
+                parsed = {}
         return bool(parsed.get("redo", False))
     except Exception:
         return False
