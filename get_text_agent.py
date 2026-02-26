@@ -10,7 +10,7 @@ import torch
 from chemiener import ChemNER
 from huggingface_hub import hf_hub_download
 ckpt_path = "./ner.ckpt"
-model2 = ChemNER(ckpt_path, device=torch.device('cpu'))
+model2 = ChemNER(ckpt_path, device=torch.device('cuda'))
 import base64
 import os
 import shutil
@@ -180,7 +180,7 @@ def extract_reactions_from_text_in_image(image_path: str) -> dict:
     """
     # 模型目录和设备参数（可按需修改）
     model_dir = "./cre_models_v0.1"
-    device = "cpu"
+    device = "cuda"
 
     # 1. OCR 提取文本
     img = Image.open(image_path)
@@ -219,7 +219,7 @@ def extract_reactions_from_text_in_image(image_path: str) -> dict:
 def NER_from_text_in_image(image_path: str) -> dict:
     # 模型目录和设备参数（可按需修改）
     model_dir = "./cre_models_v0.1"
-    device = "cpu"
+    device = "cuda"
 
     # 1. OCR 提取文本
     img = Image.open(image_path)

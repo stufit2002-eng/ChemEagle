@@ -21,10 +21,17 @@ from get_observer import action_observer_agent, plan_observer_agent,action_obser
 from get_text_agent import text_extraction_agent, text_extraction_agent_OS
 
 
-model = ChemIEToolkit(device=torch.device('cpu')) 
+# ── CUDA-only device ─────────────────────────────────────────────────────────
+if not torch.cuda.is_available():
+    raise RuntimeError("CUDA GPU is required but not available. "
+                       "Ensure CUDA drivers and a CUDA-capable GPU are present.")
+torch.backends.cudnn.benchmark = True   # auto-tune conv kernels (speed boost)
+
+_DEVICE = torch.device('cuda')
+model = ChemIEToolkit(device=_DEVICE)
 ckpt_path = "./rxn.ckpt"
-model1 = RxnIM(ckpt_path, device=torch.device('cpu'))
-device = torch.device('cpu')
+model1 = RxnIM(ckpt_path, device=_DEVICE)
+device = _DEVICE
 
 API_KEY = os.getenv("API_KEY")
 if not API_KEY:
