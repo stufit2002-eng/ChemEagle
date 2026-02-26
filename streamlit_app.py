@@ -2,8 +2,8 @@
 ChemEagle Streamlit UI
 ======================
 Upload a chemical reaction image, run the extraction pipeline, then
-validate every returned SMILES with RDKit and display 2-D structure
-drawings for valid ones.
+display each reaction visually: 2-D RDKit structure drawings for every
+reactant and product, with reaction conditions shown in the middle.
 
 Run with:
     streamlit run streamlit_app.py
@@ -57,7 +57,7 @@ def _validate_smiles(smiles: str) -> tuple[bool, bytes | None]:
             return False, None
 
         AllChem.Compute2DCoords(mol)
-        img = Draw.MolToImage(mol, size=(320, 240))
+        img = Draw.MolToImage(mol, size=(300, 220))
         buf = BytesIO()
         img.save(buf, format="PNG")
         return True, buf.getvalue()
@@ -65,93 +65,126 @@ def _validate_smiles(smiles: str) -> tuple[bool, bytes | None]:
         return False, None
 
 
-# ── SMILES extraction ─────────────────────────────────────────────────────────
+# ── Render a single molecule (image or fallback text) ─────────────────────────
 
-def _extract_smiles(data: dict) -> list[dict]:
-    """Walk the pipeline output and collect every unique SMILES.
+def _render_molecule(smiles: str, label: str = "", show_smiles: bool = True) -> None:
+    """Render one molecule as a 2-D image with label and validity badge.
 
-    Handles the three known output shapes:
-    * ``original_molecule_list``  – keys are SMILES strings
-    * ``molecule_coref``          – list of ``{smiles, texts, …}``
-    * ``reactions``               – nested reactants / products
-    Plus a generic recursive sweep for any other ``smiles`` key.
-
-    Returns a list of dicts: ``{smiles, label, context}``.
+    If RDKit cannot parse the SMILES the raw string is shown instead.
     """
-    seen: set[str] = set()
+    is_valid, png = _validate_smiles(smiles)
+
+    if label:
+        st.markdown(f"**{label}**")
+
+    if is_valid and png:
+        st.image(png, use_container_width=True)
+        st.caption("🟢 Valid SMILES")
+    else:
+        st.caption("🔴 Invalid SMILES")
+        st.caption("_(structure unavailable)_")
+
+    if show_smiles:
+        st.code(smiles, language=None)
+
+
+# ── Render one reaction as a visual row ───────────────────────────────────────
+
+def _render_reaction(rxn: dict, mol_img_width: int = 200) -> None:
+    """Display a single reaction: reactants → [conditions] → products.
+
+    Each molecule is drawn as a 2-D RDKit image inside its own column.
+    Conditions are shown in a centre column between reactants and products.
+    """
+    rid   = rxn.get("reaction_id", "?")
+    note  = rxn.get("note", "")
+    header = f"**Reaction {rid}**" + (f" — {note}" if note else "")
+    st.markdown(header)
+
+    reactants  = rxn.get("reactants", [])
+    products   = rxn.get("products",  [])
+    conditions = rxn.get("conditions", [])
+
+    # ── Build column layout: [reactants…] [arrow+conditions] [products…] ──────
+    n_r = max(len(reactants), 1)
+    n_p = max(len(products),  1)
+
+    # weights: each reactant/product gets weight 2, arrow column weight 1
+    col_weights = [2] * n_r + [1] + [2] * n_p
+    cols = st.columns(col_weights)
+
+    # ── Reactants ────────────────────────────────────────────────────────────
+    for i, r in enumerate(reactants):
+        smiles = r.get("smiles", "")
+        label  = r.get("label", f"Reactant {i + 1}")
+        with cols[i]:
+            with st.container(border=True):
+                _render_molecule(smiles, label)
+
+    # If no reactants, leave the first column(s) empty (already have 1 col)
+    if not reactants:
+        with cols[0]:
+            st.caption("_(no reactants)_")
+
+    # ── Arrow + conditions ───────────────────────────────────────────────────
+    arrow_col = cols[n_r]
+    with arrow_col:
+        st.markdown(
+            "<div style='text-align:center;font-size:2rem;padding-top:60px;'>⟶</div>",
+            unsafe_allow_html=True,
+        )
+        if conditions:
+            st.markdown(
+                "<div style='text-align:center;font-size:0.85rem;color:#555;'>"
+                + "<br>".join(f"• {c}" for c in conditions)
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<div style='text-align:center;font-size:0.8rem;color:#aaa;'>"
+                "no conditions"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+    # ── Products ─────────────────────────────────────────────────────────────
+    for j, p in enumerate(products):
+        smiles = p.get("smiles", "")
+        label  = p.get("label", f"Product {j + 1}")
+        with cols[n_r + 1 + j]:
+            with st.container(border=True):
+                _render_molecule(smiles, label)
+
+    if not products:
+        with cols[n_r + 1]:
+            st.caption("_(no products)_")
+
+
+# ── Collect extra molecules (not already in reactions) ────────────────────────
+
+def _extra_molecules(data: dict, reaction_smiles: set[str]) -> list[dict]:
+    """Return molecules from original_molecule_list / molecule_coref
+    that were not already shown in any reaction."""
     out: list[dict] = []
+    seen: set[str] = set()
 
-    def _add(smiles: str, label: str = "", context: str = "") -> None:
+    def _add(smiles: str, label: str, context: str) -> None:
         smiles = (smiles or "").strip()
-        if smiles and smiles not in seen:
+        if smiles and smiles not in seen and smiles not in reaction_smiles:
             seen.add(smiles)
-            out.append({"smiles": smiles, "label": str(label), "context": context})
+            out.append({"smiles": smiles, "label": label, "context": context})
 
-    # original_molecule_list  {smiles: [label, note, role, …]}
     for smiles, info in data.get("original_molecule_list", {}).items():
         label = info[0] if isinstance(info, list) and info else ""
         role  = info[2] if isinstance(info, list) and len(info) > 2 else ""
         _add(smiles, label, f"molecule list · {role}" if role else "molecule list")
 
-    # molecule_coref  [{smiles, texts, bbox_id}, …]
     for item in data.get("molecule_coref", []):
         texts = item.get("texts", [])
         _add(item.get("smiles", ""), texts[0] if texts else "", "molecule_coref")
 
-    # reactions  [{reaction_id, reactants:[{smiles,…}], products:[…]}, …]
-    for rxn in data.get("reactions", []):
-        rid = rxn.get("reaction_id", "")
-        note = rxn.get("note", "")
-        tag = f"rxn {rid}" + (f" · {note}" if note else "")
-        for r in rxn.get("reactants", []):
-            _add(r.get("smiles", ""), r.get("label", "reactant"), f"{tag} · reactant")
-        for p in rxn.get("products", []):
-            _add(p.get("smiles", ""), p.get("label", "product"), f"{tag} · product")
-
-    # Generic recursive sweep catches any remaining {smiles: …} keys
-    def _sweep(obj: object, ctx: str = "") -> None:
-        if isinstance(obj, dict):
-            s = obj.get("smiles") or obj.get("SMILES")
-            if s:
-                _add(str(s), str(obj.get("label", "")), ctx)
-            for k, v in obj.items():
-                if k not in ("smiles", "SMILES"):
-                    _sweep(v, ctx or k)
-        elif isinstance(obj, list):
-            for item in obj:
-                _sweep(item, ctx)
-
-    _sweep(data)
     return out
-
-
-# ── Render a single molecule card ─────────────────────────────────────────────
-
-def _render_molecule_card(mol: dict) -> None:
-    """Render one SMILES entry as a Streamlit column card."""
-    smiles    = mol["smiles"]
-    label     = mol["label"]
-    context   = mol["context"]
-
-    is_valid, png = _validate_smiles(smiles)
-
-    badge = "🟢 **Valid SMILES**" if is_valid else "🔴 **Invalid SMILES**"
-    st.markdown(badge)
-
-    if label:
-        st.markdown(f"**Label:** `{label}`")
-    if context:
-        st.markdown(
-            f"<span style='font-size:0.8em;color:#888'>{context}</span>",
-            unsafe_allow_html=True,
-        )
-
-    st.code(smiles, language=None)
-
-    if is_valid and png:
-        st.image(png, use_container_width=True)
-    else:
-        st.caption("_(structure unavailable)_")
 
 
 # ── Main UI ───────────────────────────────────────────────────────────────────
@@ -166,8 +199,8 @@ def main() -> None:
     # ── Sidebar options ───────────────────────────────────────────────────
     with st.sidebar:
         st.header("Settings")
-        cols_per_row = st.slider("Molecules per row", 1, 5, 3)
-        show_invalid = st.checkbox("Show invalid SMILES", value=True)
+        show_smiles_code = st.checkbox("Show SMILES strings", value=True)
+        show_invalid     = st.checkbox("Show invalid SMILES in extra molecules", value=True)
         st.markdown("---")
         st.markdown("**About**")
         st.markdown(
@@ -228,68 +261,141 @@ def main() -> None:
     with st.expander("📄 Raw pipeline output (JSON)", expanded=False):
         st.json(result)
 
-    # ── Reactions table (if present) ──────────────────────────────────────
-    if result.get("reactions"):
-        with st.expander(f"⚗️ Reactions ({len(result['reactions'])} found)", expanded=True):
-            for rxn in result["reactions"]:
-                rid  = rxn.get("reaction_id", "?")
-                note = rxn.get("note", "")
-                header = f"**Reaction {rid}**" + (f" — {note}" if note else "")
-                st.markdown(header)
+    # ── Reactions (visual) ────────────────────────────────────────────────
+    reactions = result.get("reactions", [])
 
-                r_smiles = [r.get("smiles", "") for r in rxn.get("reactants", [])]
-                p_smiles = [p.get("smiles", "") for p in rxn.get("products", [])]
-                conds    = rxn.get("conditions", [])
+    if reactions:
+        st.subheader(f"⚗️ Reactions — {len(reactions)} found")
 
-                c1, c2, c3 = st.columns(3)
-                c1.markdown("**Reactants**")
-                for s in r_smiles:
-                    c1.code(s, language=None)
-                c2.markdown("**Products**")
-                for s in p_smiles:
-                    label = next(
-                        (p.get("label", "") for p in rxn.get("products", []) if p.get("smiles") == s),
-                        "",
-                    )
-                    c2.code(f"{s}  # {label}" if label else s, language=None)
-                c3.markdown("**Conditions**")
-                for cond in conds:
-                    c3.markdown(f"- {cond}")
-                st.divider()
+        # Collect all SMILES shown in reactions for de-duplication later
+        reaction_smiles: set[str] = set()
+        for rxn in reactions:
+            for r in rxn.get("reactants", []):
+                reaction_smiles.add((r.get("smiles") or "").strip())
+            for p in rxn.get("products", []):
+                reaction_smiles.add((p.get("smiles") or "").strip())
+        reaction_smiles.discard("")
 
-    # ── SMILES validation grid ─────────────────────────────────────────────
-    molecules = _extract_smiles(result)
+        for rxn in reactions:
+            # Temporarily override show_smiles inside each molecule renderer
+            # by monkey-patching the closure via a flag stored in session state
+            # — simpler: just pass show_smiles_code via a wrapper
+            _render_reaction_with_flag(rxn, show_smiles_code)
+            st.divider()
+    else:
+        st.info("No reactions found in the pipeline output.")
+        reaction_smiles = set()
 
-    if not molecules:
-        st.warning("No SMILES found in the pipeline output.")
-        return
+    # ── Extra molecules (not in reactions) ────────────────────────────────
+    extras = _extra_molecules(result, reaction_smiles)
+    if extras:
+        with st.expander(
+            f"🔬 Other extracted molecules ({len(extras)})", expanded=bool(not reactions)
+        ):
+            # Validity summary
+            validity = {m["smiles"]: _validate_smiles(m["smiles"])[0] for m in extras}
+            valid_n   = sum(1 for v in validity.values() if v)
+            invalid_n = len(extras) - valid_n
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total", len(extras))
+            c2.metric("Valid ✓", valid_n)
+            c3.metric("Invalid ✗", invalid_n)
 
-    # Pre-validate all to build summary metrics before rendering
-    validity = {m["smiles"]: _validate_smiles(m["smiles"])[0] for m in molecules}
-    valid_n   = sum(1 for v in validity.values() if v)
-    invalid_n = len(molecules) - valid_n
+            display = extras if show_invalid else [m for m in extras if validity[m["smiles"]]]
+            if not display:
+                st.info("All extra SMILES are invalid (enable 'Show invalid SMILES' in sidebar).")
+            else:
+                cols_per_row = 3
+                for i in range(0, len(display), cols_per_row):
+                    batch = display[i : i + cols_per_row]
+                    cols  = st.columns(cols_per_row)
+                    for col, mol in zip(cols, batch):
+                        with col:
+                            with st.container(border=True):
+                                smiles  = mol["smiles"]
+                                label   = mol["label"]
+                                context = mol["context"]
+                                is_valid, png = _validate_smiles(smiles)
+                                badge = "🟢 **Valid**" if is_valid else "🔴 **Invalid**"
+                                st.markdown(badge)
+                                if label:
+                                    st.markdown(f"**Label:** `{label}`")
+                                if context:
+                                    st.markdown(
+                                        f"<span style='font-size:0.8em;color:#888'>{context}</span>",
+                                        unsafe_allow_html=True,
+                                    )
+                                if show_smiles_code:
+                                    st.code(smiles, language=None)
+                                if is_valid and png:
+                                    st.image(png, use_container_width=True)
+                                else:
+                                    st.caption("_(structure unavailable)_")
 
-    # Summary metrics at the top
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total molecules", len(molecules))
-    m2.metric("Valid ✓", valid_n)
-    m3.metric("Invalid ✗", invalid_n)
 
-    st.subheader("Molecule Validation")
+# ── Wrapper so show_smiles_code reaches _render_molecule ─────────────────────
 
-    display = molecules if show_invalid else [m for m in molecules if validity[m["smiles"]]]
+def _render_reaction_with_flag(rxn: dict, show_smiles_code: bool) -> None:
+    """Like _render_reaction but respects the show_smiles_code toggle."""
+    rid   = rxn.get("reaction_id", "?")
+    note  = rxn.get("note", "")
+    header = f"**Reaction {rid}**" + (f" — {note}" if note else "")
+    st.markdown(header)
 
-    if not display:
-        st.info("All extracted SMILES are invalid (enable 'Show invalid SMILES' in sidebar to view them).")
-        return
+    reactants  = rxn.get("reactants", [])
+    products   = rxn.get("products",  [])
+    conditions = rxn.get("conditions", [])
 
-    for i in range(0, len(display), cols_per_row):
-        batch = display[i : i + cols_per_row]
-        cols  = st.columns(cols_per_row)
-        for col, mol in zip(cols, batch):
-            with col:
-                with st.container(border=True):
-                    _render_molecule_card(mol)
+    n_r = max(len(reactants), 1)
+    n_p = max(len(products),  1)
+
+    col_weights = [2] * n_r + [1] + [2] * n_p
+    cols = st.columns(col_weights)
+
+    # Reactants
+    for i, r in enumerate(reactants):
+        smiles = r.get("smiles", "")
+        label  = r.get("label", f"Reactant {i + 1}")
+        with cols[i]:
+            with st.container(border=True):
+                _render_molecule(smiles, label, show_smiles=show_smiles_code)
+
+    if not reactants:
+        with cols[0]:
+            st.caption("_(no reactants)_")
+
+    # Arrow + conditions
+    with cols[n_r]:
+        st.markdown(
+            "<div style='text-align:center;font-size:2rem;padding-top:60px;'>⟶</div>",
+            unsafe_allow_html=True,
+        )
+        if conditions:
+            st.markdown(
+                "<div style='text-align:center;font-size:0.85rem;color:#555;'>"
+                + "<br>".join(f"• {c}" for c in conditions)
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<div style='text-align:center;font-size:0.8rem;color:#aaa;'>"
+                "no conditions"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+    # Products
+    for j, p in enumerate(products):
+        smiles = p.get("smiles", "")
+        label  = p.get("label", f"Product {j + 1}")
+        with cols[n_r + 1 + j]:
+            with st.container(border=True):
+                _render_molecule(smiles, label, show_smiles=show_smiles_code)
+
+    if not products:
+        with cols[n_r + 1]:
+            st.caption("_(no products)_")
 
 
 if __name__ == "__main__":
