@@ -64,6 +64,12 @@ def _resolve_tool_name(raw_name: str) -> str | None:
     lower = raw_name.lower().strip()
     if lower in _AGENT_NAME_TO_TOOL:
         return _AGENT_NAME_TO_TOOL[lower]
+    # Normalize hyphens to underscores (observer may return mixed forms like
+    # "structure_based_r-group_substitution_agent" which only matches when
+    # the hyphen in "r-group" is also converted to an underscore).
+    normalized = lower.replace("-", "_")
+    if normalized in _AGENT_NAME_TO_TOOL:
+        return _AGENT_NAME_TO_TOOL[normalized]
     return raw_name  # already a real function name — pass through unchanged
 
 
