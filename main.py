@@ -384,7 +384,15 @@ def ChemEagle(
         print("DEBUG [Azure]: Successfully parsed JSON directly")
     except json.JSONDecodeError:
         print("WARNING [Azure]: Direct JSON parsing failed, trying to extract JSON from text...")
-        gpt_output = extract_json_from_text_with_reasoning(raw_content)
+        # "Extra data" case: valid JSON followed by trailing non-JSON text
+        try:
+            gpt_output, _ = json.JSONDecoder().raw_decode(raw_content.lstrip())
+            print("DEBUG [Azure]: Successfully parsed JSON with raw_decode")
+        except json.JSONDecodeError:
+            try:
+                gpt_output = extract_json_from_text_with_reasoning(raw_content)
+            except Exception:
+                gpt_output = None
         if gpt_output is None:
             print(f"ERROR [Azure]: Failed to parse JSON from model response")
             print(f"Raw content (last 2000 chars):\n{raw_content[-2000:]}")

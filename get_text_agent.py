@@ -362,8 +362,24 @@ Here is my step-by-step analysis:
     # Execute each requested tool
     tool_calls = assistant_message.tool_calls
     if not tool_calls:
-        # If no tool calls, return the response directly
-        return json.loads(response1.choices[0].message.content) if response1.choices[0].message.content else {}
+        # If no tool calls, parse response with the same robust fallback
+        raw_content1 = response1.choices[0].message.content or ""
+        if not raw_content1:
+            return {}
+        from get_R_group_sub_agent import extract_json_from_text_with_reasoning
+        try:
+            return json.loads(raw_content1)
+        except json.JSONDecodeError:
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(raw_content1.lstrip())
+                return obj
+            except json.JSONDecodeError:
+                pass
+            try:
+                result = extract_json_from_text_with_reasoning(raw_content1)
+            except Exception:
+                result = None
+            return result if result is not None else {"content": raw_content1}
     
     tool_results_msgs = []
     for call in tool_calls:
@@ -400,7 +416,17 @@ Here is my step-by-step analysis:
     try:
         return json.loads(raw2)
     except json.JSONDecodeError:
-        result = extract_json_from_text_with_reasoning(raw2)
+        # "Extra data" case: valid JSON followed by trailing non-JSON text
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(raw2.lstrip())
+            return obj
+        except json.JSONDecodeError:
+            pass
+        # JSON embedded inside reasoning/explanatory text
+        try:
+            result = extract_json_from_text_with_reasoning(raw2)
+        except Exception:
+            result = None
         return result if result is not None else {"content": raw2}
 
 
