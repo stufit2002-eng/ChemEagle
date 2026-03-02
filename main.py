@@ -60,24 +60,57 @@ _AGENT_NAME_TO_TOOL: dict = {
     # Text extraction agent
     "text_extraction_agent":                        "text_extraction_agent",
     "text extraction agent":                        "text_extraction_agent",
-    # Condition interpretation agent — not yet implemented, skip
+    # Condition interpretation agent — not yet implemented, skip all variants
     "condition_interpretation_agent":               None,
     "condition interpretation agent":               None,
+    "condition_interpretation":                     None,
+    "condition interpretation":                     None,
+    "interpret_conditions":                         None,
+    "interpret conditions":                         None,
+    "conditions_interpretation_agent":              None,
+    "conditions_interpretation":                    None,
+    "conditions interpretation agent":              None,
+    "condition_agent":                              None,
+    "condition agent":                              None,
 }
+
+# The only function names that _resolve_tool_name is allowed to pass through
+# unchanged (i.e. when the observer returns the real function name directly).
+_KNOWN_TOOL_FUNCTIONS: frozenset[str] = frozenset({
+    "process_reaction_image_with_product_variant_r_group",
+    "process_reaction_image_with_table_r_group",
+    "get_full_reaction_template",
+    "get_multi_molecular_full",
+    "text_extraction_agent",
+})
 
 
 def _resolve_tool_name(raw_name: str) -> str | None:
-    """Return the TOOL_MAP key for *raw_name*, or None if it should be skipped."""
+    """Return the TOOL_MAP key for *raw_name*, or None if it should be skipped.
+
+    Resolution order:
+    1. Exact match in _AGENT_NAME_TO_TOOL (case-insensitive)
+    2. Hyphen-normalised match in _AGENT_NAME_TO_TOOL
+    3. Pass-through ONLY if the name is in _KNOWN_TOOL_FUNCTIONS
+    4. None — skip silently (catches every hallucinated tool name from the
+       plan observer so it never reaches the TOOL_MAP lookup that would raise)
+    """
     lower = raw_name.lower().strip()
     if lower in _AGENT_NAME_TO_TOOL:
         return _AGENT_NAME_TO_TOOL[lower]
     # Normalize hyphens to underscores (observer may return mixed forms like
-    # "structure_based_r-group_substitution_agent" which only matches when
-    # the hyphen in "r-group" is also converted to an underscore).
+    # "structure_based_r-group_substitution_agent").
     normalized = lower.replace("-", "_")
     if normalized in _AGENT_NAME_TO_TOOL:
         return _AGENT_NAME_TO_TOOL[normalized]
-    return raw_name  # already a real function name — pass through unchanged
+    # Only allow pass-through for names we actually know about.
+    # Any other string (e.g. "interpret_conditions" hallucinated by the
+    # plan observer) is silently skipped instead of forwarded to TOOL_MAP
+    # where it would raise ValueError.
+    if normalized in _KNOWN_TOOL_FUNCTIONS:
+        return normalized
+    print(f"[D] Skipping unrecognised tool from plan observer: {raw_name!r}")
+    return None
 
 
 def _normalize_tool_args(raw_args: Optional[dict], image_path: str) -> dict:
