@@ -60,10 +60,12 @@ def retry_api_call(func, max_retries=3, base_delay=2, backoff_factor=2, *args, *
     raise RuntimeError("API 调用失败，未知错误")
 
 
+torch.backends.cudnn.benchmark = True
+_DEVICE = torch.device('cuda')
 ckpt_path = "./rxn.ckpt"
-model1 = RxnIM(ckpt_path, device=torch.device('cpu'))
-device = torch.device('cpu')
-model = ChemIEToolkit(device=torch.device('cpu'))
+model1 = RxnIM(ckpt_path, device=_DEVICE)
+device = _DEVICE
+model = ChemIEToolkit(device=_DEVICE)
 
 API_KEY = os.getenv("API_KEY")
 if not API_KEY:

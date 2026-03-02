@@ -12,10 +12,12 @@ import sys
 from rxnim import RxnIM
 import json
 import base64
-model = ChemIEToolkit(device=torch.device('cpu')) 
+torch.backends.cudnn.benchmark = True
+_DEVICE = torch.device('cuda')
+model = ChemIEToolkit(device=_DEVICE)
 ckpt_path = "./rxn.ckpt"
-model1 = RxnIM(ckpt_path, device=torch.device('cpu'))
-device = torch.device('cpu')
+model1 = RxnIM(ckpt_path, device=_DEVICE)
+device = _DEVICE
 import base64
 import torch
 import json
