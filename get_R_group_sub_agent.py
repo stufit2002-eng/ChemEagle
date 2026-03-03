@@ -517,6 +517,9 @@ def get_multi_molecular_text_to_correct(image_path: str) -> list:
             ]:
                 bbox.pop(key, None)
 
+    if not coref_results:
+        print("WARNING [Azure]: get_multi_molecular_text_to_correct got empty coref_results, returning empty")
+        return []
     # 假设 parse_coref_data_with_fallback 需要传入单个 dict
     parsed = parse_coref_data_with_fallback(coref_results[0])
     print(f"[get_multi_molecular_text_to_correct] parsed: {json.dumps(parsed)}")
@@ -561,6 +564,9 @@ def get_multi_molecular_text_to_correct_OS(image_path: str) -> list:
             ]:
                 bbox.pop(key, None)
 
+    if not coref_results:
+        print("WARNING [OS]: get_multi_molecular_text_to_correct_OS got empty coref_results, returning empty")
+        return []
     # 假设 parse_coref_data_with_fallback 需要传入单个 dict
     parsed = parse_coref_data_with_fallback(coref_results[0])
     print(f"[get_multi_molecular_text_to_correct] parsed: {json.dumps(parsed)}")
@@ -581,6 +587,9 @@ def get_multi_molecular_full(image_path: str) -> list:
             for key in ["category", "molfile", "symbols", 'atoms', "bonds", 'category_id', 'score', 'corefs',"coords","edges"]: #'atoms'
                 bbox.pop(key, None)  # 安全地移除键
 
+    if not coref_results:
+        print("WARNING: get_multi_molecular_full got empty coref_results, returning empty")
+        return []
     data = coref_results[0]
     parsed = parse_coref_data_with_fallback(data)
 
@@ -808,6 +817,9 @@ def get_full_reaction_template(image_path: str) -> dict:
             for key in ["category", "molfile", "symbols", 'atoms', "bonds", 'category_id', 'score', 'corefs',"coords","edges"]: #'atoms'
                 bbox.pop(key, None)  # 安全地移除键
 
+    if not coref_results:
+        print("WARNING [Azure]: get_full_reaction_template got empty coref_results, returning empty")
+        return {"molecule_coref": []}
     data = coref_results[0]
     parsed = parse_coref_data_with_fallback(data)
 
@@ -850,6 +862,9 @@ def get_full_reaction_template_OS(image_path: str) -> dict:
             for key in ["category", "molfile", "symbols", 'atoms', "bonds", 'category_id', 'score', 'corefs',"coords","edges"]: #'atoms'
                 bbox.pop(key, None)  # 安全地移除键
 
+    if not coref_results:
+        print("WARNING [OS]: get_full_reaction_template_OS got empty coref_results, returning empty")
+        return {"molecule_coref": []}
     data = coref_results[0]
     parsed = parse_coref_data_with_fallback(data)
 
@@ -1137,9 +1152,13 @@ def process_reaction_image_with_product_variant_R_group(image_path: str) -> dict
             for key in ["category", "molfile", "symbols", 'atoms', "bonds", 'category_id', 'score', 'corefs',"coords","edges"]: #'atoms'
                 bbox.pop(key, None)  # 安全地移除键
 
-    data = coref_results[0]
-    parsed = parse_coref_data_with_fallback(data)
-    
+    if not coref_results:
+        print("WARNING [Azure]: process_reaction_image_with_product_variant_R_group got empty coref_results")
+        parsed = []
+    else:
+        data = coref_results[0]
+        parsed = parse_coref_data_with_fallback(data)
+
     toadd = {
         "reaction_template": {
             "reactants": reactants_array,
@@ -1431,9 +1450,13 @@ def process_reaction_image_with_product_variant_R_group_OS(
             for key in ["category", "molfile", "symbols", 'atoms', "bonds", 'category_id', 'score', 'corefs',"coords","edges"]:
                 bbox.pop(key, None)  # 安全地移除键
 
-    data = coref_results[0]
-    parsed = parse_coref_data_with_fallback(data)
-    
+    if not coref_results:
+        print("WARNING [OS]: process_reaction_image_with_product_variant_R_group_OS got empty coref_results")
+        parsed = []
+    else:
+        data = coref_results[0]
+        parsed = parse_coref_data_with_fallback(data)
+
     toadd = {
         "reaction_template": {
             "reactants": reactants_array,
