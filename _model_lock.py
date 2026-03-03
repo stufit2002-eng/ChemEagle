@@ -1,21 +1,17 @@
 """
-Shared re-entrant lock for CUDA model inference.
+CUDA_MODEL_LOCK — now a no-op context manager.
 
-All local ML models (RxnIM / model1, ChemIEToolkit / model,
-ChemNER / cner) are module-level singletons whose internal state
-(decoder cache, pre_kv tensors, attention buffers) is NOT thread-safe.
+Thread-safety is handled at the root cause:
+  rxnim/transformer/decoder.py  and
+  molnextr/transformer/decoder.py
 
-Import CUDA_MODEL_LOCK in every sub-agent file and wrap each
-model.predict / model.extract call with:
+both use threading.local() for their decoder state dict, so concurrent
+inference calls on the same model instance never share the cache.
 
-    with CUDA_MODEL_LOCK:
-        result = model.some_method(...)
-
-Azure/OS API calls (network I/O) do NOT need the lock — they release
-the GIL while waiting, so multiple threads can overlap their API waits
-even when only one holds the lock for local inference.
+CUDA_MODEL_LOCK is kept here as a nullcontext so existing call sites
+(with CUDA_MODEL_LOCK: ...) compile and run without any locking overhead.
 """
 
-import threading
+import contextlib
 
-CUDA_MODEL_LOCK = threading.RLock()
+CUDA_MODEL_LOCK = contextlib.nullcontext()
