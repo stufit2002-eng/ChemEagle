@@ -26,6 +26,7 @@ Output layout:
 Usage:
     python process_pdf.py paper.pdf
     python process_pdf.py paper.pdf --output-dir ./my_results --model base
+    python process_pdf.py paper.pdf --workers 8
 """
 
 import argparse
@@ -33,7 +34,9 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -49,6 +52,14 @@ if not torch.cuda.is_available():
 
 DEVICE = torch.device("cuda")
 torch.backends.cudnn.benchmark = True   # auto-tune conv kernels
+
+# Thread-safe print lock
+_print_lock = threading.Lock()
+
+def _tprint(*args, **kwargs):
+    """Thread-safe print."""
+    with _print_lock:
+        print(*args, **kwargs)
 
 
 # ── VisualHeist (Florence-2) detection — CUDA-aware wrapper ──────────────────
@@ -98,6 +109,91 @@ def _detect_figures(page_image: Image.Image, model, processor) -> dict:
     return annotation["<OD>"]
 
 
+# ── Per-crop ChemEagle worker ─────────────────────────────────────────────────
+
+def _run_crop(task: dict, chemeagle_fn) -> dict:
+    """
+    Execute ChemEagle on one cropped image and write result + meta JSON files.
+
+    Parameters
+    ----------
+    task : dict with keys:
+        page_num, crop_num, label, bbox,
+        crop_img_path, crop_result_path, crop_meta_path,
+        skipped (bool), skip_reason (str|None)
+    chemeagle_fn : callable — ChemEagle or ChemEagle_OS
+
+    Returns
+    -------
+    dict with keys: page_num, crop_num, success, error, elapsed, n_rxn, result
+    """
+    page_num        = task["page_num"]
+    crop_num        = task["crop_num"]
+    crop_stem       = task["crop_stem"]
+    label           = task["label"]
+    bbox            = task["bbox"]
+    crop_img_path   = task["crop_img_path"]
+    crop_result_path = task["crop_result_path"]
+    crop_meta_path  = task["crop_meta_path"]
+
+    # Skipped crops (e.g. tables)
+    if task.get("skipped"):
+        result  = {"skipped": True, "reason": task.get("skip_reason", "")}
+        success = None
+        error   = None
+        elapsed = 0.0
+        _tprint(f"    [p{page_num}/c{crop_num}] {crop_stem}  [skipped — {task.get('skip_reason', 'table')}]")
+    else:
+        t0      = time.perf_counter()
+        result  = None
+        error   = None
+        success = False
+        try:
+            result  = chemeagle_fn(str(crop_img_path))
+            elapsed = time.perf_counter() - t0
+            success = True
+            n_rxn   = len((result or {}).get("reactions", []))
+            _tprint(f"    [p{page_num}/c{crop_num}] {crop_stem}  ok  ({elapsed:.1f}s, {n_rxn} reaction(s))")
+        except Exception as ce:
+            elapsed = time.perf_counter() - t0
+            error   = str(ce)
+            result  = {"error": error, "parsed": False}
+            _tprint(f"    [p{page_num}/c{crop_num}] {crop_stem}  FAILED  ({error[:80]})")
+
+    # Write result JSON
+    crop_result_path.write_text(
+        json.dumps(result or {}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # Write per-crop metadata
+    meta = {
+        "page":         page_num,
+        "crop":         crop_num,
+        "label":        label,
+        "bbox":         [float(v) for v in bbox],
+        "image_file":   crop_img_path.name,
+        "result_file":  crop_result_path.name,
+        "processing_s": round(elapsed, 2),
+        "success":      success,
+        "error":        error,
+    }
+    crop_meta_path.write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    return {
+        "page_num":  page_num,
+        "crop_num":  crop_num,
+        "success":   success,
+        "error":     error,
+        "elapsed":   elapsed,
+        "n_rxn":     len((result or {}).get("reactions", [])) if success else 0,
+        "result":    result,
+    }
+
+
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
 def process_pdf(
@@ -106,6 +202,7 @@ def process_pdf(
     model_size: str = "large",
     backend: str = "azure",
     skip_tables: bool = False,
+    workers: int = 4,
 ) -> Path:
     """
     Run the full PDF → crop → ChemEagle pipeline.
@@ -118,6 +215,8 @@ def process_pdf(
     backend     : "azure"  → use ChemEagle (AzureOpenAI)
                   "os"     → use ChemEagle_OS (vLLM / Ollama)
     skip_tables : If True, skip crops labelled as "table" (only process figures).
+    workers     : Number of parallel ChemEagle workers (default 4).
+                  Set to 1 to disable parallelism.
 
     Returns
     -------
@@ -145,44 +244,42 @@ def process_pdf(
 
     # Lazy-import ChemEagle here so VisualHeist loading prints first
     if backend == "azure":
-        from main import ChemEagle as _run_chemeagle  # noqa: PLC0415
+        from main import ChemEagle as _run_chemeagle
         chemeagle_fn = _run_chemeagle
     else:
-        from main import ChemEagle_OS as _run_chemeagle_os  # noqa: PLC0415
+        from main import ChemEagle_OS as _run_chemeagle_os
         chemeagle_fn = _run_chemeagle_os
 
-    print(f"      ChemEagle backend: {backend}")
+    print(f"      ChemEagle backend : {backend}")
+    print(f"      Parallel workers  : {workers}")
 
-    # ── Step 3: Per-page detection + ChemEagle ────────────────────────────────
-    print("\n[3/3] Extracting figures and running ChemEagle …\n")
+    # ── Step 3a: Detection — sequential (GPU) ─────────────────────────────────
+    print("\n[3/3] Detecting figures …\n")
 
     summary: dict = {
         "pdf":           str(pdf_path),
         "timestamp":     datetime.now().isoformat(),
         "model_size":    model_size,
         "backend":       backend,
+        "workers":       workers,
         "n_pages":       len(page_images),
         "skip_tables":   skip_tables,
         "pages":         [],
     }
 
-    total_crops   = 0
-    total_success = 0
-    total_skipped = 0
-    total_failed  = 0
+    # Build a flat list of crop tasks (detection runs first, sequentially)
+    all_tasks: list[dict] = []
+    page_entries: list[dict] = []
 
     for page_idx, page_img in enumerate(page_images):
         page_num = page_idx + 1
         print(f"  ── Page {page_num}/{len(page_images)} ", end="", flush=True)
 
-        # Detect figures / tables on this page
         try:
             annotation = _detect_figures(page_img, vh_model, vh_processor)
         except Exception as det_err:
             print(f"[detection failed: {det_err}]")
-            summary["pages"].append({
-                "page": page_num, "n_detected": 0, "crops": []
-            })
+            page_entries.append({"page": page_num, "n_detected": 0, "crops": []})
             continue
 
         bboxes = annotation.get("bboxes", [])
@@ -190,9 +287,7 @@ def process_pdf(
         print(f"→ {len(bboxes)} object(s) detected")
 
         if not bboxes:
-            summary["pages"].append({
-                "page": page_num, "n_detected": 0, "crops": []
-            })
+            page_entries.append({"page": page_num, "n_detected": 0, "crops": []})
             continue
 
         page_dir = run_dir / f"page_{page_num:02d}"
@@ -213,82 +308,95 @@ def process_pdf(
             crop_result_path = page_dir / f"{crop_stem}_result.json"
             crop_meta_path   = page_dir / f"{crop_stem}_meta.json"
 
-            # Crop and save the region
+            # Crop and save now (sequential, avoids CUDA contention later)
             x1, y1, x2, y2 = bbox
-            cropped = page_img.crop((x1, y1, x2, y2))
-            cropped.save(str(crop_img_path))
-            total_crops += 1
+            page_img.crop((x1, y1, x2, y2)).save(str(crop_img_path))
 
-            # Optionally skip table crops
-            if skip_tables and "table" in label.lower():
-                print(f"    [{crop_num}/{len(bboxes)}] {crop_stem}  [skipped — table]")
-                total_skipped += 1
-                result  = {"skipped": True, "reason": "table"}
-                success = None   # neither success nor failure
-                error   = None
-                elapsed = 0.0
-            else:
-                t0 = time.perf_counter()
-                result  = None
-                error   = None
-                success = False
+            is_table  = skip_tables and "table" in label.lower()
+            all_tasks.append({
+                "page_num":        page_num,
+                "crop_num":        crop_num,
+                "crop_stem":       crop_stem,
+                "label":           label,
+                "bbox":            bbox,
+                "crop_img_path":   crop_img_path,
+                "crop_result_path": crop_result_path,
+                "crop_meta_path":  crop_meta_path,
+                "skipped":         is_table,
+                "skip_reason":     "table" if is_table else None,
+                "run_dir":         run_dir,
+            })
 
-                print(f"    [{crop_num}/{len(bboxes)}] {crop_stem} … ", end="", flush=True)
-                try:
-                    result  = chemeagle_fn(str(crop_img_path))
-                    elapsed = time.perf_counter() - t0
-                    success = True
-                    total_success += 1
-                    n_rxn = len((result or {}).get("reactions", []))
-                    print(f"ok  ({elapsed:.1f}s, {n_rxn} reaction(s))")
-                except Exception as ce:
-                    elapsed = time.perf_counter() - t0
-                    error   = str(ce)
-                    result  = {"error": error, "parsed": False}
-                    total_failed += 1
-                    print(f"FAILED  ({error[:80]})")
-
-            # Write result JSON
-            crop_result_path.write_text(
-                json.dumps(result or {}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-
-            # Write per-crop metadata
-            meta = {
-                "page":         page_num,
-                "crop":         crop_num,
-                "label":        label,
-                "bbox":         [float(v) for v in bbox],
-                "image_file":   crop_img_path.name,
-                "result_file":  crop_result_path.name,
-                "processing_s": round(elapsed, 2),
-                "success":      success,
-                "error":        error,
-            }
-            crop_meta_path.write_text(
-                json.dumps(meta, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-
+            # Reserve slot in page_entry (filled in after parallel run)
             page_entry["crops"].append({
                 "crop":        crop_num,
                 "label":       label,
                 "bbox":        [float(v) for v in bbox],
                 "image_file":  str(crop_img_path.relative_to(run_dir)),
                 "result_file": str(crop_result_path.relative_to(run_dir)),
-                "success":     success,
+                "success":     None,   # filled after parallel phase
             })
 
-        summary["pages"].append(page_entry)
+        page_entries.append(page_entry)
+
+    total_crops = len(all_tasks)
+    print(f"\n  {total_crops} crop(s) queued across {len(page_images)} page(s).")
+
+    # ── Step 3b: ChemEagle — parallel ────────────────────────────────────────
+    print(f"\n  Running ChemEagle with {workers} worker(s) …\n")
+
+    total_success = 0
+    total_skipped = 0
+    total_failed  = 0
+
+    # Index results by (page_num, crop_num) for merging back into page_entries
+    results_index: dict[tuple[int, int], dict] = {}
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_to_task = {
+            pool.submit(_run_crop, task, chemeagle_fn): task
+            for task in all_tasks
+        }
+        for future in as_completed(future_to_task):
+            try:
+                info = future.result()
+            except Exception as exc:
+                task = future_to_task[future]
+                info = {
+                    "page_num": task["page_num"],
+                    "crop_num": task["crop_num"],
+                    "success":  False,
+                    "error":    str(exc),
+                    "elapsed":  0.0,
+                    "n_rxn":    0,
+                }
+
+            key = (info["page_num"], info["crop_num"])
+            results_index[key] = info
+
+            if info["success"] is True:
+                total_success += 1
+            elif info["success"] is None:
+                total_skipped += 1
+            else:
+                total_failed += 1
+
+    # ── Step 3c: Merge results back into page_entries ─────────────────────────
+    for page_entry in page_entries:
+        for crop_slot in page_entry["crops"]:
+            key = (page_entry["page"], crop_slot["crop"])
+            info = results_index.get(key)
+            if info is not None:
+                crop_slot["success"] = info["success"]
 
     # ── Write top-level summary ───────────────────────────────────────────────
+    summary["pages"] = page_entries
     summary.update({
-        "n_crops_total":  total_crops,
-        "n_success":      total_success,
-        "n_skipped":      total_skipped,
-        "n_failed":       total_failed,
-        "completed_at":   datetime.now().isoformat(),
+        "n_crops_total": total_crops,
+        "n_success":     total_success,
+        "n_skipped":     total_skipped,
+        "n_failed":      total_failed,
+        "completed_at":  datetime.now().isoformat(),
     })
     (run_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
@@ -301,6 +409,7 @@ def process_pdf(
     print(f"  Pages    : {len(page_images)}")
     print(f"  Crops    : {total_crops}  "
           f"(success={total_success}, failed={total_failed}, skipped={total_skipped})")
+    print(f"  Workers  : {workers}")
     print(f"  Output   : {run_dir}")
     print(f"{'='*60}\n")
 
@@ -334,6 +443,10 @@ if __name__ == "__main__":
         "--skip-tables", action="store_true",
         help="Skip crops whose label contains 'table' (only process figures).",
     )
+    parser.add_argument(
+        "--workers", type=int, default=4,
+        help="Number of parallel ChemEagle workers. Set to 1 to disable parallelism.",
+    )
     args = parser.parse_args()
 
     process_pdf(
@@ -342,4 +455,5 @@ if __name__ == "__main__":
         model_size=args.model,
         backend=args.backend,
         skip_tables=args.skip_tables,
+        workers=args.workers,
     )
