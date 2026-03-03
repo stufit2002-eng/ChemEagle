@@ -32,6 +32,7 @@ import io
 import re
 import time
 from openai import InternalServerError, RateLimitError, APIError
+from _model_lock import CUDA_MODEL_LOCK
 
 
 
@@ -581,7 +582,8 @@ def get_multi_molecular_full(image_path: str) -> list:
     
     # 将图像作为输入传递给模型
     #coref_results = process_reaction_image_with_multiple_products_and_text_correctmultiR(image_path)
-    coref_results = model.extract_molecule_corefs_from_figures([image])
+    with CUDA_MODEL_LOCK:
+        coref_results = model.extract_molecule_corefs_from_figures([image])
     for item in coref_results:
         for bbox in item.get("bboxes", []):
             for key in ["category", "molfile", "symbols", 'atoms', "bonds", 'category_id', 'score', 'corefs',"coords","edges"]: #'atoms'
@@ -684,7 +686,8 @@ def get_reaction_full(image_path: str) -> dict:
     including only reactants, conditions, and products with their smiles, bbox, or text.
     '''
     image_file = image_path
-    raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
+    with CUDA_MODEL_LOCK:
+        raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
     #raw_prediction = get_reaction_withatoms_correctR(image_path)
     return raw_prediction
 
@@ -792,7 +795,8 @@ def get_full_reaction_template(image_path: str) -> dict:
     '''
     image = Image.open(image_path).convert('RGB')
     image_file = image_path
-    raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
+    with CUDA_MODEL_LOCK:
+        raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
     ####################raw_prediction = get_reaction_withatoms_correctR(image_path)###############################################################################################
     for reaction in raw_prediction:
         for section in ("reactants", "products", "conditions"):
@@ -837,7 +841,8 @@ def get_full_reaction_template_OS(image_path: str) -> dict:
     '''
     image = Image.open(image_path).convert('RGB')
     image_file = image_path
-    raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
+    with CUDA_MODEL_LOCK:
+        raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
     ####################raw_prediction = get_reaction_withatoms_correctR(image_path)###############################################################################################
     for reaction in raw_prediction:
         for section in ("reactants", "products", "conditions"):

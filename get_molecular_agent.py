@@ -24,6 +24,7 @@ import os
 import copy
 from typing import Optional
 import time
+from _model_lock import CUDA_MODEL_LOCK
 
 
 def retry_api_call(func, max_retries=3, base_delay=2, backoff_factor=2, *args, **kwargs):
@@ -79,7 +80,8 @@ def get_multi_molecular(image_path: str) -> list:
     image = Image.open(image_path).convert('RGB')
     
     # 将图像作为输入传递给模型
-    coref_results = model.extract_molecule_corefs_from_figures([image])
+    with CUDA_MODEL_LOCK:
+        coref_results = model.extract_molecule_corefs_from_figures([image])
     #print(f"coref_results:{coref_results}")
     for item in coref_results:
         for bbox in item.get("bboxes", []):
@@ -96,7 +98,8 @@ def get_multi_molecular_text_to_correct(image_path: str) -> list:
     image = Image.open(image_path).convert('RGB')
     
     # 将图像作为输入传递给模型
-    coref_results = model.extract_molecule_corefs_from_figures([image])
+    with CUDA_MODEL_LOCK:
+        coref_results = model.extract_molecule_corefs_from_figures([image])
     for item in coref_results:
         for bbox in item.get("bboxes", []):
             for key in ["category", "bbox", "molfile", "symbols", 'atoms', "bonds", 'category_id', 'score', 'corefs']: #'atoms'
@@ -112,7 +115,8 @@ def get_multi_molecular_text_to_correct_withatoms(image_path: str) -> list:
     image = Image.open(image_path).convert('RGB')
     
     # 将图像作为输入传递给模型
-    coref_results = model.extract_molecule_corefs_from_figures([image])
+    with CUDA_MODEL_LOCK:
+        coref_results = model.extract_molecule_corefs_from_figures([image])
     for item in coref_results:
         for bbox in item.get("bboxes", []):
             for key in ["coords","edges","molfile", 'atoms', "bonds", 'category_id', 'score', 'corefs']: #'atoms'
@@ -293,12 +297,13 @@ def process_reaction_image_with_multiple_products_and_text(image_path: str) -> d
         '''Returns a list of reactions extracted from the image.'''
         # 打开图像文件
         image = Image.open(image_path).convert('RGB')
-        
+
         # 将图像作为输入传递给模型
-        coref_results = model.extract_molecule_corefs_from_figures([image])
+        with CUDA_MODEL_LOCK:
+            coref_results = model.extract_molecule_corefs_from_figures([image])
         return coref_results
 
-    
+
     coref_results = get_multi_molecular(image_path)
 
 
@@ -551,12 +556,13 @@ def process_reaction_image_with_multiple_products_and_text_correctR(image_path: 
         '''Returns a list of reactions extracted from the image.'''
         # 打开图像文件
         image = Image.open(image_path).convert('RGB')
-        
+
         # 将图像作为输入传递给模型
-        coref_results = model.extract_molecule_corefs_from_figures([image])
+        with CUDA_MODEL_LOCK:
+            coref_results = model.extract_molecule_corefs_from_figures([image])
         return coref_results
 
-    
+
     coref_results = get_multi_molecular(image_path)
 
 
@@ -804,12 +810,13 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR(image_p
         '''Returns a list of reactions extracted from the image.'''
         # 打开图像文件
         image = Image.open(image_path).convert('RGB')
-        
+
         # 将图像作为输入传递给模型
-        coref_results = model.extract_molecule_corefs_from_figures([image])
+        with CUDA_MODEL_LOCK:
+            coref_results = model.extract_molecule_corefs_from_figures([image])
         return coref_results
 
-    
+
     coref_results = get_multi_molecular(image_path)
 
 
@@ -1088,16 +1095,17 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR_OS(
                 f"Could not parse JSON from model response. Content may not be valid JSON.",
                 raw_content, 0
             )
-    
+
     print(f"gpt_output_mol:{gpt_output}")
 
     def get_multi_molecular(image_path: str) -> list:
         '''Returns a list of reactions extracted from the image.'''
         # 打开图像文件
         image = Image.open(image_path).convert('RGB')
-        
+
         # 将图像作为输入传递给模型
-        coref_results = model.extract_molecule_corefs_from_figures([image])
+        with CUDA_MODEL_LOCK:
+            coref_results = model.extract_molecule_corefs_from_figures([image])
         return coref_results
 
     coref_results = get_multi_molecular(image_path)

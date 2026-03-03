@@ -17,6 +17,7 @@ import shutil
 import re
 import time
 from openai import InternalServerError, RateLimitError, APIError
+from _model_lock import CUDA_MODEL_LOCK
 
 
 API_KEY = os.getenv("API_KEY")
@@ -234,9 +235,10 @@ def NER_from_text_in_image(image_path: str) -> dict:
     rxn_extractor = RxnExtractor(model_dir, use_cuda=use_cuda)
 
     # 4. 提取反应（注意 get_reactions 需要列表输入）
-    predictions = model2.predict_strings([paragraph])
+    with CUDA_MODEL_LOCK:
+        predictions = model2.predict_strings([paragraph])
 
-    return predictions 
+    return predictions
 
 
 

@@ -19,6 +19,7 @@ from PIL import Image
 import os
 from typing import Optional
 import time
+from _model_lock import CUDA_MODEL_LOCK
 
 def retry_api_call(func, max_retries=3, base_delay=2, backoff_factor=2, *args, **kwargs):
     last_exception = None
@@ -76,7 +77,8 @@ def get_reaction(image_path: str) -> dict:
     image = Image.open(image_file)
 
     image_file = image_path
-    raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
+    with CUDA_MODEL_LOCK:
+        raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
     #print(f'raw_prediction:{raw_prediction}')
 
     if not raw_prediction:
@@ -116,7 +118,8 @@ def get_full_reaction(image_path: str) -> dict:
     including reactants, conditions, and products, with their smiles, text, and bbox.
     '''
     image_file = image_path
-    raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
+    with CUDA_MODEL_LOCK:
+        raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
     for reaction in raw_prediction:
         for section in ("reactants", "products", "conditions"):
             for entry in reaction.get(section, []):
@@ -305,9 +308,10 @@ def get_reaction_withatoms(image_path: str) -> dict:
         including reactants, conditions, and products, with their smiles, text, and bbox.
         '''
         image_file = image_path
-        raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
+        with CUDA_MODEL_LOCK:
+            raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
         return raw_prediction
-    
+
     input2 = get_reaction_full(image_path)
 
 
@@ -528,9 +532,10 @@ def get_reaction_withatoms_correctR(image_path: str) -> dict:
         '''
 
         image_file = image_path
-        raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
+        with CUDA_MODEL_LOCK:
+            raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
         return raw_prediction
-    
+
     input2 = get_reaction_full(image_path)
 
     if not input2:
@@ -766,9 +771,10 @@ def get_reaction_withatoms_correctR_OS(
         '''
 
         image_file = image_path
-        raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
+        with CUDA_MODEL_LOCK:
+            raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
         return raw_prediction
-    
+
     input2 = get_reaction_full(image_path)
 
     if not input2:
