@@ -79,6 +79,9 @@ def get_reaction(image_path: str) -> dict:
     raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
     #print(f'raw_prediction:{raw_prediction}')
 
+    if not raw_prediction:
+        return {}
+
     # Ensure raw_prediction is treated as a list directly
     structured_output = {}
     for section_key in ['reactants', 'conditions', 'products']:

@@ -1516,7 +1516,11 @@ def process_reaction_image_with_table_R_group(image_path: str) -> dict:
     
     if not response.choices:
         return {}
-    tool_call = response.choices[0].message.tool_calls[0]
+    _tool_calls = response.choices[0].message.tool_calls or []
+    if not _tool_calls:
+        print("WARNING [Azure]: process_reaction_image_with_table_R_group got no tool calls, returning {}")
+        return {}
+    tool_call = _tool_calls[0]
     tool_name = tool_call.function.name  # 修改此处
     tool_arguments = tool_call.function.arguments  # 新增此处
     tool_call_id = tool_call.id
@@ -1788,8 +1792,9 @@ def process_reaction_image_with_table_R_group_OS(
         return {}
     tool_calls = response.choices[0].message.tool_calls or []
     if not tool_calls:
-        raise ValueError("No tool calls returned from model")
-    
+        print("WARNING [OS]: process_reaction_image_with_table_R_group got no tool calls, returning {}")
+        return {}
+
     tool_call = tool_calls[0]
     tool_name = tool_call.function.name
     tool_arguments = tool_call.function.arguments
