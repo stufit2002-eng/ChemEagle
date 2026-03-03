@@ -533,6 +533,9 @@ def get_reaction_withatoms_correctR(image_path: str) -> dict:
     
     input2 = get_reaction_full(image_path)
 
+    if not input2:
+        print("WARNING [Azure]: get_reaction_full returned empty list, skipping symbol update")
+        return [gpt_output] if isinstance(gpt_output, dict) else []
 
 
     def update_input_with_symbols(input1, input2, conversion_function):
@@ -554,7 +557,7 @@ def get_reaction_withatoms_correctR(image_path: str) -> dict:
                 if bbox in symbol_mapping:
                     updated_symbols = symbol_mapping[bbox]
                     item['symbols'] = updated_symbols
-                    
+
                     # 更新 atoms 的 atom_symbol
                     if 'atoms' in item:
                         atoms = item['atoms']
@@ -563,19 +566,19 @@ def get_reaction_withatoms_correctR(image_path: str) -> dict:
                         else:
                             for atom, symbol in zip(atoms, updated_symbols):
                                 atom['atom_symbol'] = symbol
-                    
+
                     # 如果 coords 和 edges 存在，调用转换函数生成新的 smiles 和 molfile
                     if 'coords' in item and 'edges' in item:
                         coords = item['coords']
                         edges = item['edges']
                         new_smiles, new_molfile, _ = conversion_function(coords, updated_symbols, edges)
-                        
+
                         # 替换旧的 smiles 和 molfile
                         item['smiles'] = new_smiles
                         item['molfile'] = new_molfile
 
         return input2
-    
+
     updated_data = [update_input_with_symbols(gpt_output, input2[0], _convert_graph_to_smiles)]
     print(f"rxn_agent_output:{updated_data}")
 
@@ -768,6 +771,10 @@ def get_reaction_withatoms_correctR_OS(
     
     input2 = get_reaction_full(image_path)
 
+    if not input2:
+        print("WARNING [OS]: get_reaction_full returned empty list, skipping symbol update")
+        return [gpt_output] if isinstance(gpt_output, dict) else []
+
     def update_input_with_symbols(input1, input2, conversion_function):
         symbol_mapping = {}
         for key in ['reactants', 'conditions', 'products']:
@@ -787,7 +794,7 @@ def get_reaction_withatoms_correctR_OS(
                 if bbox in symbol_mapping:
                     updated_symbols = symbol_mapping[bbox]
                     item['symbols'] = updated_symbols
-                    
+
                     # 更新 atoms 的 atom_symbol
                     if 'atoms' in item:
                         atoms = item['atoms']
@@ -796,7 +803,8 @@ def get_reaction_withatoms_correctR_OS(
                         else:
                             for atom, symbol in zip(atoms, updated_symbols):
                                 atom['atom_symbol'] = symbol
-                    
+
+
                     # 如果 coords 和 edges 存在，调用转换函数生成新的 smiles 和 molfile
                     if 'coords' in item and 'edges' in item:
                         coords = item['coords']
