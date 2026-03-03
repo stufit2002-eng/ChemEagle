@@ -987,6 +987,8 @@ def process_reaction_image_with_product_variant_R_group(image_path: str) -> dict
     }
 
     # Step 2: 处理多个工具调用
+    if not response.choices:
+        return {}
     tool_calls = response.choices[0].message.tool_calls
     results = []
 
@@ -995,15 +997,15 @@ def process_reaction_image_with_product_variant_R_group(image_path: str) -> dict
         tool_name = tool_call.function.name
         tool_arguments = tool_call.function.arguments
         tool_call_id = tool_call.id
-        
+
         tool_args = json.loads(tool_arguments)
-        
+
         if tool_name in TOOL_MAP:
             # 调用工具并获取结果
             tool_result = TOOL_MAP[tool_name](image_path)
         else:
             raise ValueError(f"Unknown tool called: {tool_name}")
-        
+
         # 保存每个工具调用结果
         results.append({
             'role': 'tool',
@@ -1056,6 +1058,8 @@ def process_reaction_image_with_product_variant_R_group(image_path: str) -> dict
 
     
     # 获取 GPT 生成的结果
+    if not response.choices:
+        return {}
     gpt_output = json.loads(response.choices[0].message.content)
     print("R_group_agent_output:", gpt_output)
     image = Image.open(image_path).convert('RGB')
@@ -1265,6 +1269,8 @@ def process_reaction_image_with_product_variant_R_group_OS(
     }
 
     # Step 2: 处理多个工具调用
+    if not response.choices:
+        return {}
     tool_calls = response.choices[0].message.tool_calls or []
     results = []
 
@@ -1273,15 +1279,15 @@ def process_reaction_image_with_product_variant_R_group_OS(
         tool_name = tool_call.function.name
         tool_arguments = tool_call.function.arguments
         tool_call_id = tool_call.id
-        
+
         tool_args = json.loads(tool_arguments)
-        
+
         if tool_name in TOOL_MAP:
             # 调用工具并获取结果
             tool_result = TOOL_MAP[tool_name](image_path)
         else:
             raise ValueError(f"Unknown tool called: {tool_name}")
-        
+
         # 保存每个工具调用结果
         results.append({
             'role': 'tool',
@@ -1331,8 +1337,10 @@ def process_reaction_image_with_product_variant_R_group_OS(
     )
 
     # 获取 GPT 生成的结果
+    if not response.choices:
+        return {}
     raw_content = response.choices[0].message.content
-    
+
     # 检查内容是否为空
     if not raw_content or not raw_content.strip():
         print(f"ERROR [OS]: Model returned empty content")
@@ -1506,7 +1514,13 @@ def process_reaction_image_with_table_R_group(image_path: str) -> dict:
     )
 
     
-    tool_call = response.choices[0].message.tool_calls[0]
+    if not response.choices:
+        return {}
+    _tool_calls = response.choices[0].message.tool_calls or []
+    if not _tool_calls:
+        print("WARNING [Azure]: process_reaction_image_with_table_R_group got no tool calls, returning {}")
+        return {}
+    tool_call = _tool_calls[0]
     tool_name = tool_call.function.name  # 修改此处
     tool_arguments = tool_call.function.arguments  # 新增此处
     tool_call_id = tool_call.id
@@ -1676,7 +1690,9 @@ def process_reaction_image_with_table_R_group(image_path: str) -> dict:
         raise TypeError(f"Unexpected tool_result type: {type(reaction_preds)}")
 
     input1 = tool_result_json[0]
-    input2 = json.loads(response.choices[0].message.content) 
+    if not response.choices:
+        return {}
+    input2 = json.loads(response.choices[0].message.content)
     updated_input = replace_symbols_and_generate_smiles(input1, input2)
     print(f"txt_R_group_agent_output:{updated_input}")
     return updated_input
@@ -1772,10 +1788,13 @@ def process_reaction_image_with_table_R_group_OS(
         tool_choice="auto",
     )
 
+    if not response.choices:
+        return {}
     tool_calls = response.choices[0].message.tool_calls or []
     if not tool_calls:
-        raise ValueError("No tool calls returned from model")
-    
+        print("WARNING [OS]: process_reaction_image_with_table_R_group got no tool calls, returning {}")
+        return {}
+
     tool_call = tool_calls[0]
     tool_name = tool_call.function.name
     tool_arguments = tool_call.function.arguments
@@ -1835,6 +1854,8 @@ def process_reaction_image_with_table_R_group_OS(
         temperature=0
     )
     
+    if not response.choices:
+        return {}
     print(f"DEBUG [OS]: Model response content type: {type(response.choices[0].message.content)}")
     print(f"DEBUG [OS]: Model response content preview: {str(response.choices[0].message.content)[:500]}")
 
@@ -1948,8 +1969,10 @@ def process_reaction_image_with_table_R_group_OS(
         raise TypeError(f"Unexpected tool_result type: {type(reaction_preds)}")
 
     input1 = tool_result_json[0]
-    
+
     # 获取模型返回的原始内容
+    if not response.choices:
+        return {}
     raw_content = response.choices[0].message.content
     
     # 检查内容是否为空

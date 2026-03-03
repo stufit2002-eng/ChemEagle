@@ -79,6 +79,9 @@ def get_reaction(image_path: str) -> dict:
     raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
     #print(f'raw_prediction:{raw_prediction}')
 
+    if not raw_prediction:
+        return {}
+
     # Ensure raw_prediction is treated as a list directly
     structured_output = {}
     for section_key in ['reactants', 'conditions', 'products']:
@@ -223,6 +226,8 @@ def get_reaction_withatoms(image_path: str) -> dict:
     }
 
     # Step 2: 处理多个工具调用
+    if not response.choices:
+        return {}
     tool_calls = response.choices[0].message.tool_calls
     results = []
 
@@ -288,6 +293,8 @@ def get_reaction_withatoms(image_path: str) -> dict:
 
     
     # 获取 GPT 生成的结果
+    if not response.choices:
+        return {}
     gpt_output = json.loads(response.choices[0].message.content)
     #print(f"gpt_output1:{gpt_output}")
 
@@ -441,6 +448,8 @@ def get_reaction_withatoms_correctR(image_path: str) -> dict:
     }
 
     # Step 2: 处理多个工具调用
+    if not response.choices:
+        return {}
     tool_calls = response.choices[0].message.tool_calls
     results = []
 
@@ -506,6 +515,8 @@ def get_reaction_withatoms_correctR(image_path: str) -> dict:
 
     
     # 获取 GPT 生成的结果
+    if not response.choices:
+        return {}
     gpt_output = json.loads(response.choices[0].message.content)
     print(f"gpt_output_rxn:{gpt_output}")
 
@@ -651,6 +662,8 @@ def get_reaction_withatoms_correctR_OS(
     }
 
     # Step 2: 处理多个工具调用
+    if not response.choices:
+        return {}
     tool_calls = response.choices[0].message.tool_calls or []
     results = []
 
@@ -718,7 +731,8 @@ def get_reaction_withatoms_correctR_OS(
 
     # 获取 GPT 生成的结果（支持从包含思考过程的文本中提取）
     from get_R_group_sub_agent import extract_json_from_text_with_reasoning
-    
+    if not response.choices:
+        return {}
     raw_content = response.choices[0].message.content
     
     try:
