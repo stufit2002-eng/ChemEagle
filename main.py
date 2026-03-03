@@ -262,6 +262,9 @@ def ChemEagle(
     )
     
     # 解析 planner 返回的 agent 列表
+    if not planner_response.choices:
+        print("WARNING [Azure]: planner got empty choices, returning {}")
+        return {}
     planner_output = planner_response.choices[0].message.content.strip()
     print(f"[D] Planner output: {planner_output}")
     
@@ -427,6 +430,9 @@ def ChemEagle(
 
     # Parse JSON from response (with fallback for reasoning-model text wrapping)
     from get_R_group_sub_agent import extract_json_from_text_with_reasoning
+    if not response.choices:
+        print("WARNING [Azure]: final response got empty choices, returning {}")
+        return {}
     raw_content = response.choices[0].message.content
     try:
         gpt_output = json.loads(raw_content)
@@ -499,6 +505,9 @@ def ChemEagle_OS(
     )
     
     # 解析 planner 返回的 agent 列表
+    if not planner_response.choices:
+        print("WARNING [OS]: planner got empty choices, returning {}")
+        return {}
     planner_output = planner_response.choices[0].message.content.strip()
     print(f"[OS_D] Planner output: {planner_output}")
     
@@ -676,6 +685,9 @@ def ChemEagle_OS(
     print(response)
     
     # 获取原始响应内容
+    if not response.choices:
+        print("WARNING [OS]: final response got empty choices, returning {}")
+        return {}
     raw_content = response.choices[0].message.content
     
     # 尝试解析 JSON（支持从包含思考过程的文本中提取）

@@ -217,6 +217,8 @@ def process_reaction_image_with_multiple_products_and_text(image_path: str) -> d
     }
 
     # Step 2: 处理多个工具调用
+    if not response.choices:
+        return {}
     tool_calls = response.choices[0].message.tool_calls
     results = []
 
@@ -282,6 +284,8 @@ def process_reaction_image_with_multiple_products_and_text(image_path: str) -> d
 
     
     # 获取 GPT 生成的结果
+    if not response.choices:
+        return {}
     gpt_output = [json.loads(response.choices[0].message.content)]
 
 
@@ -470,6 +474,8 @@ def process_reaction_image_with_multiple_products_and_text_correctR(image_path: 
     }
 
     # Step 2: 处理多个工具调用
+    if not response.choices:
+        return {}
     tool_calls = response.choices[0].message.tool_calls
     results = []
 
@@ -535,6 +541,8 @@ def process_reaction_image_with_multiple_products_and_text_correctR(image_path: 
 
     
     # 获取 GPT 生成的结果
+    if not response.choices:
+        return {}
     gpt_output = [json.loads(response.choices[0].message.content)]
     print(f"gpt_output_mol:{gpt_output}")
 
@@ -719,6 +727,8 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR(image_p
     }
 
     # Step 2: 处理多个工具调用
+    if not response.choices:
+        return {}
     tool_calls = response.choices[0].message.tool_calls
     results = []
 
@@ -784,6 +794,8 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR(image_p
 
     
     # 获取 GPT 生成的结果
+    if not response.choices:
+        return {}
     gpt_output = [json.loads(response.choices[0].message.content)]
     print(f"gpt_output_mol:{gpt_output}")
 
@@ -984,6 +996,8 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR_OS(
     }
 
     # Step 2: 处理多个工具调用
+    if not response.choices:
+        return {}
     tool_calls = response.choices[0].message.tool_calls or []
     results = []
 
@@ -1051,7 +1065,8 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR_OS(
 
     # 获取 GPT 生成的结果（支持从包含思考过程的文本中提取）
     from get_R_group_sub_agent import extract_json_from_text_with_reasoning
-    
+    if not response.choices:
+        return {}
     raw_content = response.choices[0].message.content
     
     try:

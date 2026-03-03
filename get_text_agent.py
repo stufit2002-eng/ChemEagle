@@ -357,13 +357,16 @@ Here is my step-by-step analysis:
     )
 
     # Get assistant message with tool calls
+    if not response1.choices:
+        print("WARNING [Azure]: text_extraction_agent got empty choices on first call, returning {}")
+        return {}
     assistant_message = response1.choices[0].message
-    
+
     # Execute each requested tool
     tool_calls = assistant_message.tool_calls
     if not tool_calls:
         # If no tool calls, parse response with the same robust fallback
-        raw_content1 = response1.choices[0].message.content or ""
+        raw_content1 = assistant_message.content or ""
         if not raw_content1:
             return {}
         from get_R_group_sub_agent import extract_json_from_text_with_reasoning
@@ -412,6 +415,9 @@ Here is my step-by-step analysis:
 
     # Parse JSON with fallback (response_format removed to avoid implicit temperature=0)
     from get_R_group_sub_agent import extract_json_from_text_with_reasoning
+    if not response2.choices:
+        print("WARNING [Azure]: text_extraction_agent got empty choices on second call, returning {}")
+        return {}
     raw2 = response2.choices[0].message.content or ""
     try:
         return json.loads(raw2)
@@ -618,13 +624,16 @@ Here is my step-by-step analysis:
             raise
 
     # Get assistant message with tool calls
+    if not response1.choices:
+        print("WARNING [OS]: text_extraction_agent got empty choices on first call, returning {}")
+        return {}
     assistant_message = response1.choices[0].message
-    
+
     # Execute each requested tool
     tool_calls = assistant_message.tool_calls
     if not tool_calls:
         # If no tool calls, try to parse response directly
-        raw_content = response1.choices[0].message.content
+        raw_content = assistant_message.content
         if raw_content:
             try:
                 return json.loads(raw_content)
@@ -677,6 +686,9 @@ Here is my step-by-step analysis:
     )
 
     # Parse response (support extracting JSON from text with reasoning)
+    if not response2.choices:
+        print("WARNING [OS]: text_extraction_agent got empty choices on second call, returning {}")
+        return {}
     raw_content = response2.choices[0].message.content
     
     try:
