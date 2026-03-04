@@ -446,18 +446,20 @@ def _tab_pdf(show_smiles_code: bool, show_invalid: bool) -> None:
 
     # ── Summary metrics ───────────────────────────────────────────────────────
     st.markdown("---")
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    n_hitl_summary = summary.get("n_human_review", None)
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("Pages",    summary.get("n_pages",        "?"))
     c2.metric("Crops",    summary.get("n_crops_total",  "?"))
     c3.metric("✅ Success", summary.get("n_success",    "?"))
     c4.metric("❌ Failed",  summary.get("n_failed",     "?"))
     c5.metric("⏭ Skipped", summary.get("n_skipped",    "?"))
+    c6.metric("⚠️ Review",  n_hitl_summary if n_hitl_summary is not None else "—")
     completed = summary.get("completed_at", "")
     try:
         completed = datetime.fromisoformat(completed).strftime("%b %d, %Y  %H:%M:%S")
     except Exception:
         pass
-    c6.metric("Completed", completed or "—")
+    c7.metric("Completed", completed or "—")
 
     # ── Page-level navigation ─────────────────────────────────────────────────
     pages = summary.get("pages", [])
@@ -481,6 +483,20 @@ def _tab_pdf(show_smiles_code: bool, show_invalid: bool) -> None:
     else:
         pages_to_show = pages
 
+    # HITL filter — only visible when at least one crop needs human review
+    any_hitl = any(
+        c.get("human_review_required", False)
+        for p in pages_to_show
+        for c in p.get("crops", [])
+    )
+    show_hitl_only = False
+    if any_hitl:
+        show_hitl_only = st.checkbox(
+            "⚠️ Show only crops flagged for human review",
+            value=False,
+            key="pdf_hitl_filter",
+        )
+
     auto_expand = len(pages_to_show) <= 3
 
     for page_entry in pages_to_show:
@@ -490,12 +506,14 @@ def _tab_pdf(show_smiles_code: bool, show_invalid: bool) -> None:
         n_ok       = sum(1 for c in crops if c.get("success") is True)
         n_fail     = sum(1 for c in crops if c.get("success") is False)
         n_skip     = sum(1 for c in crops if c.get("success") is None)
+        n_hitl     = sum(1 for c in crops if c.get("human_review_required", False))
 
         expander_label = (
             f"📄 Page {page_num}  —  {n_detected} detected"
             + (f"  ·  ✅ {n_ok}" if n_ok else "")
             + (f"  ·  ❌ {n_fail}" if n_fail else "")
             + (f"  ·  ⏭ {n_skip}" if n_skip else "")
+            + (f"  ·  ⚠️ {n_hitl}" if n_hitl else "")
         )
 
         with st.expander(expander_label, expanded=auto_expand):
@@ -510,11 +528,23 @@ def _tab_pdf(show_smiles_code: bool, show_invalid: bool) -> None:
                 image_rel  = crop_entry.get("image_file",  "")
                 result_rel = crop_entry.get("result_file", "")
                 bbox       = crop_entry.get("bbox",   [])
+                hitl       = crop_entry.get("human_review_required", False)
+
+                # Apply HITL-only filter (backward compatible: missing key → False)
+                if show_hitl_only and not hitl:
+                    continue
 
                 # Derive the meta file path from the result path
                 meta_rel = result_rel.replace("_result.json", "_meta.json")
 
-                status_icon = "✅" if success is True else ("⏭" if success is None else "❌")
+                if hitl:
+                    status_icon = "⚠️"
+                elif success is True:
+                    status_icon = "✅"
+                elif success is None:
+                    status_icon = "⏭"
+                else:
+                    status_icon = "❌"
                 crop_header = f"{status_icon} **Crop {crop_num} — {label}**"
 
                 # Load meta for timing info
@@ -541,6 +571,11 @@ def _tab_pdf(show_smiles_code: bool, show_invalid: bool) -> None:
 
                 with st.container(border=True):
                     st.markdown(crop_header, unsafe_allow_html=True)
+
+                    if hitl:
+                        hitl_reasons = crop_entry.get("human_review_reasons", [])
+                        reasons_str = ", ".join(hitl_reasons) if hitl_reasons else "unspecified"
+                        st.warning(f"⚠️ **Human review required** — {reasons_str}")
 
                     crop_img_path    = run_dir / image_rel
                     crop_result_path = run_dir / result_rel
