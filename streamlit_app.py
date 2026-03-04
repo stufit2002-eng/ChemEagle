@@ -417,6 +417,56 @@ def _tab_image(show_smiles_code: bool, show_invalid: bool) -> None:
 #  Tab 2 — PDF pipeline results browser
 # ═════════════════════════════════════════════════════════════════════════════
 
+# Maps HITL class codes → display config for tag badges
+_HITL_TAG_CONFIG: dict = {
+    "invalid_smiles": {
+        "label": "Invalid SMILES",
+        "bg":    "#f8d7da",
+        "fg":    "#842029",
+    },
+    "rgroup_not_substituted": {
+        "label": "R-group not substituted",
+        "bg":    "#fff3cd",
+        "fg":    "#664d03",
+    },
+    "processing_error": {
+        "label": "Processing error",
+        "bg":    "#f8d7da",
+        "fg":    "#842029",
+    },
+}
+
+def _render_hitl_tags(reasons: list) -> None:
+    """Render a row of colored HITL class tags plus a header label."""
+    if not reasons:
+        st.warning("⚠️ **Human review required**")
+        return
+    tags_html = ""
+    for reason in reasons:
+        cfg = _HITL_TAG_CONFIG.get(
+            reason,
+            {"label": reason, "bg": "#e2e3e5", "fg": "#41464b"},
+        )
+        tags_html += (
+            f"<span style='"
+            f"display:inline-block;"
+            f"padding:3px 11px;"
+            f"margin:2px 4px 2px 0;"
+            f"border-radius:12px;"
+            f"background:{cfg['bg']};"
+            f"color:{cfg['fg']};"
+            f"font-size:0.82em;"
+            f"font-weight:600;"
+            f"'>{cfg['label']}</span>"
+        )
+    st.markdown(
+        f"<div style='padding:8px 12px; border-radius:6px; "
+        f"background:#fff8e1; border-left:4px solid #f0ad4e;'>"
+        f"⚠️ <strong>Human review required</strong>&nbsp;&nbsp;{tags_html}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
 def _tab_pdf(show_smiles_code: bool, show_invalid: bool) -> None:
     st.markdown(
         "Browse structured output produced by **`process_pdf.py`**. "
@@ -574,8 +624,7 @@ def _tab_pdf(show_smiles_code: bool, show_invalid: bool) -> None:
 
                     if hitl:
                         hitl_reasons = crop_entry.get("human_review_reasons", [])
-                        reasons_str = ", ".join(hitl_reasons) if hitl_reasons else "unspecified"
-                        st.warning(f"⚠️ **Human review required** — {reasons_str}")
+                        _render_hitl_tags(hitl_reasons)
 
                     crop_img_path    = run_dir / image_rel
                     crop_result_path = run_dir / result_rel
