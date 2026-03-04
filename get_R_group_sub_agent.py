@@ -647,11 +647,14 @@ def get_reaction_from_raw(raw_pred: dict) -> dict:
 # LLM 工具：get_reaction
 # ----------------------------------------
 def get_reaction(image_path: str) -> dict:
-    """    
+    """
     Returns a structured dictionary of reactions extracted from the image,
     """
     # 复用缓存的 raw_results
-    raw_pred = get_cached_raw_results(image_path)[0]
+    raw = get_cached_raw_results(image_path)
+    if not raw:
+        return {}
+    raw_pred = raw[0]
     return get_reaction_from_raw(raw_pred)
 
 ############################### Rxn_OS
@@ -670,11 +673,14 @@ def get_cached_raw_results_OS(image_path: str):
 
 
 def get_reaction_OS(image_path: str) -> dict:
-    """    
+    """
     Returns a structured dictionary of reactions extracted from the image,
     """
     # 复用缓存的 raw_results
-    raw_pred = get_cached_raw_results_OS(image_path)[0]
+    raw = get_cached_raw_results_OS(image_path)
+    if not raw:
+        return {}
+    raw_pred = raw[0]
     return get_reaction_from_raw(raw_pred)
 
 
@@ -1094,8 +1100,10 @@ def process_reaction_image_with_product_variant_R_group(image_path: str) -> dict
     # reaction_results = model.extract_reactions_from_figures([image_np])
     #reaction_results = get_reaction_withatoms_correctR(image_path)[0]
     raw_results  = get_cached_raw_results(image_path)
+    if not raw_results:
+        return {}
     reaction_results = raw_results[0]
-    
+
     reaction = {
     "reactants": reaction_results.get('reactants', []),
     "conditions": reaction_results.get('conditions', []),
@@ -1402,8 +1410,10 @@ def process_reaction_image_with_product_variant_R_group_OS(
     # 使用 OS 版本的缓存函数
     coref_results = get_cached_multi_molecular_OS(image_path)
     raw_results = get_cached_raw_results_OS(image_path)
+    if not raw_results:
+        return {}
     reaction_results = raw_results[0]
-    
+
     reaction = {
         "reactants": reaction_results.get('reactants', []),
         "conditions": reaction_results.get('conditions', []),

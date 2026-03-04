@@ -132,6 +132,8 @@ def plan_observer_agent(image_path: str, tool_calls: List[Any]) -> List[Any]:
             except json.JSONDecodeError:
                 parsed = {}
         # Support both "plan" and "list_of_agents" keys for compatibility
+        if not isinstance(parsed, dict):
+            return tool_calls
         return parsed.get("list_of_agents", parsed.get("plan", tool_calls))
     except Exception:
         return tool_calls
@@ -172,6 +174,8 @@ def action_observer_agent(image_path: str, tool_result: Any) -> bool:
                 parsed, _ = json.JSONDecoder().raw_decode(content.lstrip())
             except json.JSONDecodeError:
                 parsed = {}
+        if not isinstance(parsed, dict):
+            return False
         return bool(parsed.get("redo", False))
     except Exception:
         return False
@@ -301,6 +305,8 @@ def plan_observer_agent_OS(
                 return tool_calls
         
         # Support both "plan" and "list_of_agents" keys for compatibility
+        if not isinstance(parsed, dict):
+            return tool_calls
         return parsed.get("list_of_agents", parsed.get("plan", tool_calls))
     except Exception as e:
         print(f"⚠️ 警告: plan_observer_agent_OS 出错: {e}，返回原始计划")
@@ -380,6 +386,8 @@ def action_observer_agent_OS(
                 print(f"⚠️ 警告: action_observer_agent_OS 无法解析 JSON，返回 False（不重做）")
                 return False
         
+        if not isinstance(parsed, dict):
+            return False
         return bool(parsed.get("redo", False))
     except Exception as e:
         print(f"⚠️ 警告: action_observer_agent_OS 出错: {e}，返回 False（不重做）")
