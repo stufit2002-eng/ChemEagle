@@ -31,12 +31,12 @@ def _get_client():
         )
     return _client
 
-PLAN_PROMPT_TEMPLATE = """System Message: 
+PLAN_PROMPT_TEMPLATE = """System Message:
 You are a plan observer. Given the graphic and the current list of agent calls (plan), decide whether the plan is sufficient.
 
-User Message: 
+User Message:
 Given the graphic and the current list of agent calls (plan), please recheck the component of the graphic and decide whether the corresponding agent is called and the plan is sufficient.
-Valid agents:
+Valid agents (exactly 5 — do NOT invent any other agent names):
 1. Reaction template parsing agent
 Parses the reaction scheme to identify reactants, products, and label mappings, and outputs a structured reaction template.
 
@@ -49,18 +49,27 @@ Uses structure panels / variant images to extract R-group values and generate en
 4. Text-based R-group substitution agent
 Reads R-group tables and enumerates products or substituents on top of a given core scaffold using text information.
 
-5. Condition interpretation agent
-Extracts and normalizes reaction conditions (catalysts, reagents, solvent, temperature, time, atmosphere, etc.) from the graphic.
+5. Text extraction agent
+Performs chemical NER and text-based reaction extraction on the text description.
 
-6. Text extraction agent
-Performs chmical NER and text-based reaction extraction on the text description.
+Mutual exclusion rule: Text-based R-group substitution agent and Structure-based R-group substitution agent MUST NOT be used at the same time.
 
 If the plan is acceptable, return the original plan as-is.
 If adjustments are required, provide the improved list of agents and briefly explain the changes.
 
+CRITICAL — name field values: Each item in list_of_agents must use the "name" field with EXACTLY one of these strings (copy verbatim, no abbreviations):
+  "process_reaction_image_with_product_variant_R_group"  ← Structure-based R-group substitution agent
+  "process_reaction_image_with_table_R_group"            ← Text-based R-group substitution agent
+  "get_full_reaction_template"                           ← Reaction template parsing agent
+  "get_multi_molecular_full"                             ← Molecular recognition agent
+  "text_extraction_agent"                                ← Text extraction agent
+
 Always respond in valid JSON with the structure:
 {{
-  "list_of_agents": [...],   // final list of agent calls
+  "list_of_agents": [
+    {{"id": "tool_call_0", "name": "<exact name from list above>", "arguments": {{"image_path": "IMAGE_PATH"}}}},
+    ...
+  ],
   "redo": true/false,
   "reason": "If changed is true, give an explanation; otherwise leave blank."
 }}

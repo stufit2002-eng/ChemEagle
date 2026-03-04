@@ -72,6 +72,25 @@ _AGENT_NAME_TO_TOOL: dict = {
     "conditions interpretation agent":              None,
     "condition_agent":                              None,
     "condition agent":                              None,
+    # Hallucinated / abbreviated forms the plan observer sometimes outputs
+    # — map them to the right implementation so nothing is silently dropped
+    "molecular_recognition":                        "get_multi_molecular_full",
+    "molecular recognition":                        "get_multi_molecular_full",
+    "text_extraction":                              "text_extraction_agent",
+    "text extraction":                              "text_extraction_agent",
+    "extract_text_from_image":                      "text_extraction_agent",
+    "extract text from image":                      "text_extraction_agent",
+    "structure_rgroup_substitution_agent":          "process_reaction_image_with_product_variant_R_group",
+    "structure rgroup substitution agent":          "process_reaction_image_with_product_variant_R_group",
+    "r_group_substitution_agent":                   "process_reaction_image_with_product_variant_R_group",
+    "rgroup_substitution_agent":                    "process_reaction_image_with_product_variant_R_group",
+    # Condition-related hallucinations — unimplemented, skip
+    "get_conditions":                               None,
+    "get conditions":                               None,
+    "interpret_reaction_conditions":                None,
+    "interpret reaction conditions":                None,
+    "reaction_conditions":                          None,
+    "extract_conditions":                           None,
 }
 
 # The only function names that _resolve_tool_name is allowed to pass through
