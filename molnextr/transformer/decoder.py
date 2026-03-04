@@ -3,6 +3,7 @@ Implementation of "Attention is All You Need" and of
 subsequent transformer based architectures
 """
 
+import threading
 import torch
 import torch.nn as nn
 
@@ -283,8 +284,8 @@ class TransformerDecoderBase(DecoderBase):
     def __init__(self, d_model, copy_attn, alignment_layer):
         super(TransformerDecoderBase, self).__init__()
 
-        # Decoder State
-        self.state = {}
+        # Decoder State - thread-local so concurrent threads never share cache
+        self._state_local = threading.local()
 
         # previously, there was a GlobalAttention module here for copy
         # attention. But it was never actually used -- the "copy" attention
@@ -293,6 +294,16 @@ class TransformerDecoderBase(DecoderBase):
         self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
 
         self.alignment_layer = alignment_layer
+
+    @property
+    def state(self):
+        if not hasattr(self._state_local, 'data'):
+            self._state_local.data = {}
+        return self._state_local.data
+
+    @state.setter
+    def state(self, value):
+        self._state_local.data = value
 
     @classmethod
     def from_opt(cls, opt, embeddings):
