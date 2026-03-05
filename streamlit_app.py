@@ -625,6 +625,20 @@ def _tab_pdf(show_smiles_code: bool, show_invalid: bool) -> None:
                     if hitl:
                         hitl_reasons = crop_entry.get("human_review_reasons", [])
                         _render_hitl_tags(hitl_reasons)
+                        _btn_key = f"hitl_p{page_num}_c{crop_num}"
+                        btn_col1, btn_col2, _ = st.columns([1, 1, 4])
+                        btn_col1.button(
+                            "🔁 Mark for Retry",
+                            key=f"retry_{_btn_key}",
+                            type="secondary",
+                            use_container_width=True,
+                        )
+                        btn_col2.button(
+                            "🚫 Mark for Exclusion",
+                            key=f"exclude_{_btn_key}",
+                            type="secondary",
+                            use_container_width=True,
+                        )
 
                     crop_img_path    = run_dir / image_rel
                     crop_result_path = run_dir / result_rel
