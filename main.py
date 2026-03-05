@@ -94,14 +94,16 @@ _AGENT_NAME_TO_TOOL: dict = {
 }
 
 # The only function names that _resolve_tool_name is allowed to pass through
-# unchanged (i.e. when the observer returns the real function name directly).
-_KNOWN_TOOL_FUNCTIONS: frozenset[str] = frozenset({
-    "process_reaction_image_with_product_variant_r_group",
-    "process_reaction_image_with_table_r_group",
-    "get_full_reaction_template",
-    "get_multi_molecular_full",
-    "text_extraction_agent",
-})
+# (i.e. when the observer returns the real function name directly).
+# Key   = lowercase/normalised form that _resolve_tool_name produces.
+# Value = canonical mixed-case TOOL_MAP key (R_group, not r_group).
+_KNOWN_TOOL_FUNCTIONS: dict[str, str] = {
+    "process_reaction_image_with_product_variant_r_group": "process_reaction_image_with_product_variant_R_group",
+    "process_reaction_image_with_table_r_group":           "process_reaction_image_with_table_R_group",
+    "get_full_reaction_template":                          "get_full_reaction_template",
+    "get_multi_molecular_full":                            "get_multi_molecular_full",
+    "text_extraction_agent":                               "text_extraction_agent",
+}
 
 
 def _resolve_tool_name(raw_name: str) -> str | None:
@@ -127,7 +129,7 @@ def _resolve_tool_name(raw_name: str) -> str | None:
     # plan observer) is silently skipped instead of forwarded to TOOL_MAP
     # where it would raise ValueError.
     if normalized in _KNOWN_TOOL_FUNCTIONS:
-        return normalized
+        return _KNOWN_TOOL_FUNCTIONS[normalized]   # canonical mixed-case name
     print(f"[D] Skipping unrecognised tool from plan observer: {raw_name!r}")
     return None
 

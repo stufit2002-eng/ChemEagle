@@ -1717,7 +1717,10 @@ def process_reaction_image_with_table_R_group(image_path: str) -> dict:
         return reactions_output
     
 
-    reaction_preds = tool_result['reaction_prediction']
+    reaction_preds = tool_result.get('reaction_prediction')
+    if not reaction_preds:
+        print("WARNING [Azure]: process_reaction_image_with_table_R_group got empty reaction_prediction, returning {}")
+        return {}
     if isinstance(reaction_preds, str):
         # 如果是字符串，就 parse
         tool_result_json = json.loads(reaction_preds)
@@ -1727,6 +1730,9 @@ def process_reaction_image_with_table_R_group(image_path: str) -> dict:
     else:
         raise TypeError(f"Unexpected tool_result type: {type(reaction_preds)}")
 
+    if not tool_result_json:
+        print("WARNING [Azure]: process_reaction_image_with_table_R_group got empty tool_result_json, returning {}")
+        return {}
     input1 = tool_result_json[0]
     if not response.choices:
         return {}
@@ -1996,7 +2002,10 @@ def process_reaction_image_with_table_R_group_OS(
         return reactions_output
     
 
-    reaction_preds = tool_result['reaction_prediction']
+    reaction_preds = tool_result.get('reaction_prediction')
+    if not reaction_preds:
+        print("WARNING [OS]: process_reaction_image_with_table_R_group_OS got empty reaction_prediction, returning {}")
+        return {}
     if isinstance(reaction_preds, str):
         # 如果是字符串，就 parse
         tool_result_json = json.loads(reaction_preds)
@@ -2006,6 +2015,9 @@ def process_reaction_image_with_table_R_group_OS(
     else:
         raise TypeError(f"Unexpected tool_result type: {type(reaction_preds)}")
 
+    if not tool_result_json:
+        print("WARNING [OS]: process_reaction_image_with_table_R_group_OS got empty tool_result_json, returning {}")
+        return {}
     input1 = tool_result_json[0]
 
     # 获取模型返回的原始内容

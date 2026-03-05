@@ -19,10 +19,10 @@ Each crop is retried up to MAX_RETRIES (3) times when any of the following
 are detected in the output:
 
   1. Processing error  — ChemEagle raised an exception.
-  2. R-group not substituted — more than 2 reactants in non-template reactions
-     still contain * or [R…] SMILES placeholders.
-  3. Invalid SMILES — one or more reactant/product SMILES strings are
-     chemically invalid (validated with RDKit when available).
+  2. R-group not substituted — 2 or more components (reactants + products) in
+     non-template reactions still contain * or [R…] SMILES placeholders.
+  3. Invalid SMILES — any reactant/product SMILES string is chemically invalid
+     (validated with RDKit when available).
 
 After MAX_RETRIES attempts, any crop that still fails any check is flagged
 ``human_review_required: true`` in both its result JSON and metadata JSON,
@@ -188,47 +188,43 @@ def _validate_smiles(smiles: str) -> bool:
 def _check_result_issues(result: dict) -> list:
     """Inspect a ChemEagle result dict for the three quality criteria.
 
-    Returns a list of short issue strings; empty list means all checks passed.
+    Returns a list of short issue class strings; empty list means all checks
+    passed.  The class strings map directly to the three HITL categories:
 
-    Issue codes
-    -----------
-    ``rgroup_not_substituted:N`` — N reactants in non-template reactions still
-        carry * / [R…] SMILES placeholders (threshold: > 2).
-    ``invalid_smiles:N``         — N invalid SMILES found in reactants/products
-        of non-template reactions.
+    ``"invalid_smiles"``        — any reactant or product SMILES is chemically
+        invalid (RDKit check; permissive fallback when RDKit is unavailable).
+    ``"rgroup_not_substituted"``— 2 or more components (reactants + products)
+        in non-template reactions still carry * / [R…] placeholders.
     """
     if not result or not isinstance(result, dict):
-        return ["empty_result"]
+        return ["invalid_smiles"]   # empty / unparseable result → suspect SMILES
 
     reactions = result.get("reactions", [])
     if not reactions:
         return []
 
-    rgroup_reactant_count = 0
-    invalid_smiles_found  = []
+    rgroup_count         = 0    # reactants + products with R-group placeholders
+    invalid_smiles_found = False
 
     for rxn in reactions:
-        is_tmpl = _is_template_reaction(rxn)
+        if _is_template_reaction(rxn):
+            continue            # skip general-scheme templates
 
-        for reactant in rxn.get("reactants", []):
-            s = reactant.get("smiles") or reactant.get("SMILES") or ""
-            if not s:
-                continue
-            if not is_tmpl and _has_rgroup(s):
-                rgroup_reactant_count += 1
-            elif not is_tmpl and not _validate_smiles(s):
-                invalid_smiles_found.append(s[:60])
-
-        for product in rxn.get("products", []):
-            s = product.get("smiles") or product.get("SMILES") or ""
-            if s and not is_tmpl and not _has_rgroup(s) and not _validate_smiles(s):
-                invalid_smiles_found.append(s[:60])
+        for role in ("reactants", "products"):
+            for item in rxn.get(role, []):
+                s = item.get("smiles") or item.get("SMILES") or ""
+                if not s:
+                    continue
+                if _has_rgroup(s):
+                    rgroup_count += 1
+                elif not _validate_smiles(s):
+                    invalid_smiles_found = True
 
     issues = []
-    if rgroup_reactant_count > 2:
-        issues.append(f"rgroup_not_substituted:{rgroup_reactant_count}")
     if invalid_smiles_found:
-        issues.append(f"invalid_smiles:{len(invalid_smiles_found)}")
+        issues.append("invalid_smiles")
+    if rgroup_count >= 2:           # ≥ 2 components (reactants + products)
+        issues.append("rgroup_not_substituted")
     return issues
 
 
