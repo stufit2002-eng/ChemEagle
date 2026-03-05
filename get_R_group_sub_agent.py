@@ -527,7 +527,10 @@ def get_multi_molecular_text_to_correct(image_path: str) -> list:
     return parsed
 
 ############################### MOl_OS
-_process_multi_molecular_cache = {}
+# NOTE: _process_multi_molecular_cache is defined once above (line ~483) and
+# shared by both the Azure and OS variants.  Do NOT re-assign it here —
+# a second `= {}` would silently wipe any entries already stored by the
+# Azure variant and break the deduplication that the cache provides.
 
 def get_cached_multi_molecular_OS(image_path: str):
     """
@@ -705,8 +708,12 @@ def get_full_reaction(image_path: str) -> dict:
     image = Image.open(image_path).convert('RGB')
     image_file = image_path
     #raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
-    # 使用原始数据，包含 coords 和 edges 等完整信息
-    raw_prediction = get_cached_raw_results(image_path)
+    # Deep-copy the cached results so that the in-place key-popping below
+    # (molfile, atoms, bonds) does NOT mutate the shared cache.  Without this
+    # copy, a retry of the same crop (or a concurrent call via a different
+    # tool path) would receive a partially-stripped dict, breaking
+    # backout_without_coref which relies on those fields being present.
+    raw_prediction = copy.deepcopy(get_cached_raw_results(image_path))
     # raw_prediction 是一个列表，每个元素是一个反应字典
     for reaction in raw_prediction:
         for section in ("reactants", "products", "conditions"):
@@ -751,8 +758,8 @@ def get_full_reaction_OS(image_path: str) -> dict:
     image = Image.open(image_path).convert('RGB')
     image_file = image_path
     #raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
-    # 使用原始数据，包含 coords 和 edges 等完整信息
-    raw_prediction = get_cached_raw_results_OS(image_path)
+    # Deep-copy so in-place mutations below do not corrupt the shared cache.
+    raw_prediction = copy.deepcopy(get_cached_raw_results_OS(image_path))
     # raw_prediction 是一个列表，每个元素是一个反应字典
     for reaction in raw_prediction:
         for section in ("reactants", "products", "conditions"):
@@ -1529,7 +1536,7 @@ def process_reaction_image_with_table_R_group(image_path: str) -> dict:
     
     response = client.chat.completions.create(
     model = 'gpt-5-mini',
-    #temperature = 0,
+    temperature = 0,
     response_format={ 'type': 'json_object' },
     messages = [
         {'role': 'system', 'content': 'You are a helpful assistant.'},
@@ -1551,7 +1558,7 @@ def process_reaction_image_with_table_R_group(image_path: str) -> dict:
     tools = tools,
     )
 
-    
+
     if not response.choices:
         return {}
     _tool_calls = response.choices[0].message.tool_calls or []
@@ -1614,10 +1621,10 @@ def process_reaction_image_with_table_R_group(image_path: str) -> dict:
         model=completion_payload["model"],
         messages=completion_payload["messages"],
         response_format={ 'type': 'json_object' },
-        #temperature=0
+        temperature=0,
     )
 
-    #print(response)   
+    #print(response)
 
 
     def replace_symbols_and_generate_smiles(input1, input2):
@@ -1634,11 +1641,28 @@ def process_reaction_image_with_table_R_group(image_path: str) -> dict:
         """
         
         reactions_output = {"reactions": []}  # 存储最终的反应输出
-        
+
+        # Guard: LLM may return a dict without a top-level 'reactions' list
+        # (e.g. it directly returns the reaction object).  Raise a descriptive
+        # error so the crop-level retry in process_pdf.py can catch and retry it.
+        if 'reactions' not in input2:
+            raise KeyError(
+                f"LLM response missing top-level 'reactions' key. "
+                f"Got keys: {list(input2.keys())}"
+            )
+
+        # Guard: input1 must have a 'reactants' list (comes from the cached
+        # model prediction; defensive check to surface corruption early).
+        if 'reactants' not in input1:
+            raise KeyError(
+                f"Reaction prediction missing 'reactants' key. "
+                f"Got keys: {list(input1.keys())}"
+            )
+
         # 遍历 input2 中的每个 reaction
         for reaction in input2['reactions']:
             reaction_id = reaction['reaction_id']
-            
+
             # 构建新的 reaction 字典
             new_reaction = {"reaction_id": reaction_id, "reactants": [], "conditions":[], "products": [], "additional_info": []}
 

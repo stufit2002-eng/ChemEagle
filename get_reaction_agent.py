@@ -425,7 +425,7 @@ def get_reaction_withatoms_correctR(image_path: str) -> dict:
     # 调用 GPT 接口
     response = client.chat.completions.create(
     model = 'gpt-5-mini',
-    #temperature = 0,
+    temperature = 0,
     response_format={ 'type': 'json_object' },
     messages = [
         {'role': 'system', 'content': 'You are a helpful assistant.'},
@@ -513,7 +513,7 @@ def get_reaction_withatoms_correctR(image_path: str) -> dict:
         model=completion_payload["model"],
         messages=completion_payload["messages"],
         response_format={ 'type': 'json_object' },
-        #temperature=0
+        temperature=0,
     )
 
 

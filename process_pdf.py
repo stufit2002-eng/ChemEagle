@@ -305,9 +305,11 @@ def _run_crop(task: dict, chemeagle_fn) -> dict:
                 else:
                     # ── Quality issue detected ────────────────────────────
                     if attempt < MAX_RETRIES:
+                        delay = 2 ** attempt   # 1 s, 2 s, 4 s …
                         _tprint(f"    [p{page_num}/c{crop_num}] {crop_stem}  "
                                 f"quality issue [{', '.join(issues)}] "
-                                f"— {attempt_tag}, retrying …")
+                                f"— {attempt_tag}, retrying in {delay}s …")
+                        time.sleep(delay)
                     else:
                         # Max retries exhausted — flag for human review
                         success      = True   # pipeline ran; result exists but suspect
@@ -326,8 +328,11 @@ def _run_crop(task: dict, chemeagle_fn) -> dict:
                 error    = str(exc)
 
                 if attempt < MAX_RETRIES:
+                    delay = 2 ** attempt   # 1 s, 2 s, 4 s …
                     _tprint(f"    [p{page_num}/c{crop_num}] {crop_stem}  "
-                            f"error ({error[:70]}) — {attempt_tag}, retrying …")
+                            f"error ({error[:70]}) — {attempt_tag}, "
+                            f"retrying in {delay}s …")
+                    time.sleep(delay)
                     error = None   # reset before next attempt
                 else:
                     # Max retries exhausted — flag for human review
