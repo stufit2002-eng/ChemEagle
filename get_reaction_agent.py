@@ -20,6 +20,7 @@ import os
 from typing import Optional
 import time
 from _model_lock import CUDA_MODEL_LOCK
+from trace_logger import TRACER
 
 def retry_api_call(func, max_retries=3, base_delay=2, backoff_factor=2, *args, **kwargs):
     last_exception = None
@@ -78,7 +79,12 @@ def get_reaction(image_path: str) -> dict:
 
     image_file = image_path
     with CUDA_MODEL_LOCK:
-        raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
+        raw_prediction = TRACER.model_call(
+            "RxnIM.predict_image_file",
+            "get_reaction_agent.py › get_reaction",
+            {"image_path": image_file, "molnextr": True, "ocr": True},
+            lambda: model1.predict_image_file(image_file, molnextr=True, ocr=True),
+        )
     #print(f'raw_prediction:{raw_prediction}')
 
     if not raw_prediction:
@@ -119,7 +125,12 @@ def get_full_reaction(image_path: str) -> dict:
     '''
     image_file = image_path
     with CUDA_MODEL_LOCK:
-        raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
+        raw_prediction = TRACER.model_call(
+            "RxnIM.predict_image_file",
+            "get_reaction_agent.py › get_full_reaction",
+            {"image_path": image_file, "molnextr": True, "ocr": True},
+            lambda: model1.predict_image_file(image_file, molnextr=True, ocr=True),
+        )
     for reaction in raw_prediction:
         for section in ("reactants", "products", "conditions"):
             for entry in reaction.get(section, []):
@@ -200,29 +211,35 @@ def get_reaction_withatoms(image_path: str) -> dict:
     ]
 
     # 调用 GPT 接口
-    response = client.chat.completions.create(
-    model = 'gpt-4o',
-    temperature = 0,
-    response_format={ 'type': 'json_object' },
-    messages = [
-        {'role': 'system', 'content': 'You are a helpful assistant.'},
-        {
-            'role': 'user',
-            'content': [
+    response = TRACER.llm_call(
+        "get_reaction_withatoms_correctR [tool-select] / gpt-4o",
+        "get_reaction_agent.py › get_reaction_withatoms_correctR",
+        {"model": "gpt-4o", "messages": messages, "tools": tools},
+        lambda: client.chat.completions.create(
+            model='gpt-4o',
+            temperature=0,
+            response_format={'type': 'json_object'},
+            messages=[
+                {'role': 'system', 'content': 'You are a helpful assistant.'},
                 {
-                    'type': 'text',
-                    'text': prompt
-                },
-                {
-                    'type': 'image_url',
-                    'image_url': {
-                        'url': f'data:image/png;base64,{base64_image}'
-                    }
-                }
-            ]},
-    ],
-    tools = tools)
-    
+                    'role': 'user',
+                    'content': [
+                        {
+                            'type': 'text',
+                            'text': prompt
+                        },
+                        {
+                            'type': 'image_url',
+                            'image_url': {
+                                'url': f'data:image/png;base64,{base64_image}'
+                            }
+                        }
+                    ]},
+            ],
+            tools=tools,
+        ),
+    )
+
 # Step 1: 工具映射表
     TOOL_MAP = {
         'get_reaction': get_reaction,
@@ -239,15 +256,15 @@ def get_reaction_withatoms(image_path: str) -> dict:
         tool_name = tool_call.function.name
         tool_arguments = tool_call.function.arguments
         tool_call_id = tool_call.id
-        
+
         tool_args = json.loads(tool_arguments)
-        
+
         if tool_name in TOOL_MAP:
             # 调用工具并获取结果
             tool_result = TOOL_MAP[tool_name](image_path)
         else:
             raise ValueError(f"Unknown tool called: {tool_name}")
-        
+
         # 保存每个工具调用结果
         results.append({
             'role': 'tool',
@@ -286,22 +303,27 @@ def get_reaction_withatoms(image_path: str) -> dict:
     }
 
 # Generate new response
-    response = client.chat.completions.create(
-        model=completion_payload["model"],
-        messages=completion_payload["messages"],
-        response_format={ 'type': 'json_object' },
-        temperature=0
+    response = TRACER.llm_call(
+        "get_reaction_withatoms_correctR [compile] / gpt-4o",
+        "get_reaction_agent.py › get_reaction_withatoms_correctR",
+        {"model": completion_payload["model"], "messages": completion_payload["messages"]},
+        lambda: client.chat.completions.create(
+            model=completion_payload["model"],
+            messages=completion_payload["messages"],
+            response_format={ 'type': 'json_object' },
+            temperature=0
+        ),
     )
 
 
-    
+
     # 获取 GPT 生成的结果
     if not response.choices:
         return {}
     gpt_output = json.loads(response.choices[0].message.content)
     #print(f"gpt_output1:{gpt_output}")
 
-    
+
     def get_reaction_full(image_path: str) -> dict:
         '''
         Returns a structured dictionary of reactions extracted from the image,
@@ -309,7 +331,12 @@ def get_reaction_withatoms(image_path: str) -> dict:
         '''
         image_file = image_path
         with CUDA_MODEL_LOCK:
-            raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
+            raw_prediction = TRACER.model_call(
+                "RxnIM.predict_image_file",
+                "get_reaction_agent.py › get_reaction_withatoms_correctR › get_reaction_full",
+                {"image_path": image_file, "molnextr": True, "ocr": True},
+                lambda img=image_file: model1.predict_image_file(img, molnextr=True, ocr=True),
+            )
         return raw_prediction
 
     input2 = get_reaction_full(image_path)
@@ -423,29 +450,35 @@ def get_reaction_withatoms_correctR(image_path: str) -> dict:
     ]
 
     # 调用 GPT 接口
-    response = client.chat.completions.create(
-    model = 'gpt-5-mini',
-    temperature = 0,
-    response_format={ 'type': 'json_object' },
-    messages = [
-        {'role': 'system', 'content': 'You are a helpful assistant.'},
-        {
-            'role': 'user',
-            'content': [
+    response = TRACER.llm_call(
+        "get_reaction_withatoms_correctR [tool-select] / gpt-5-mini",
+        "get_reaction_agent.py › get_reaction_withatoms_correctR",
+        {"model": "gpt-5-mini", "messages": messages, "tools": tools},
+        lambda: client.chat.completions.create(
+            model='gpt-5-mini',
+            temperature=0,
+            response_format={'type': 'json_object'},
+            messages=[
+                {'role': 'system', 'content': 'You are a helpful assistant.'},
                 {
-                    'type': 'text',
-                    'text': prompt
-                },
-                {
-                    'type': 'image_url',
-                    'image_url': {
-                        'url': f'data:image/png;base64,{base64_image}'
-                    }
-                }
-            ]},
-    ],
-    tools = tools)
-    
+                    'role': 'user',
+                    'content': [
+                        {
+                            'type': 'text',
+                            'text': prompt
+                        },
+                        {
+                            'type': 'image_url',
+                            'image_url': {
+                                'url': f'data:image/png;base64,{base64_image}'
+                            }
+                        }
+                    ]},
+            ],
+            tools=tools,
+        ),
+    )
+
 # Step 1: 工具映射表
     TOOL_MAP = {
         'get_reaction': get_reaction,
@@ -462,15 +495,15 @@ def get_reaction_withatoms_correctR(image_path: str) -> dict:
         tool_name = tool_call.function.name
         tool_arguments = tool_call.function.arguments
         tool_call_id = tool_call.id
-        
+
         tool_args = json.loads(tool_arguments)
-        
+
         if tool_name in TOOL_MAP:
             # 调用工具并获取结果
             tool_result = TOOL_MAP[tool_name](image_path)
         else:
             raise ValueError(f"Unknown tool called: {tool_name}")
-        
+
         # 保存每个工具调用结果
         results.append({
             'role': 'tool',
@@ -509,22 +542,27 @@ def get_reaction_withatoms_correctR(image_path: str) -> dict:
     }
 
 # Generate new response
-    response = client.chat.completions.create(
-        model=completion_payload["model"],
-        messages=completion_payload["messages"],
-        response_format={ 'type': 'json_object' },
-        temperature=0,
+    response = TRACER.llm_call(
+        "get_reaction_withatoms_correctR [compile] / gpt-5-mini",
+        "get_reaction_agent.py › get_reaction_withatoms_correctR",
+        {"model": completion_payload["model"], "messages": completion_payload["messages"]},
+        lambda: client.chat.completions.create(
+            model=completion_payload["model"],
+            messages=completion_payload["messages"],
+            response_format={ 'type': 'json_object' },
+            temperature=0,
+        ),
     )
 
 
-    
+
     # 获取 GPT 生成的结果
     if not response.choices:
         return {}
     gpt_output = json.loads(response.choices[0].message.content)
     print(f"gpt_output_rxn:{gpt_output}")
 
-    
+
     def get_reaction_full(image_path: str) -> dict:
         '''
         Returns a structured dictionary of reactions extracted from the image,
@@ -533,7 +571,12 @@ def get_reaction_withatoms_correctR(image_path: str) -> dict:
 
         image_file = image_path
         with CUDA_MODEL_LOCK:
-            raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
+            raw_prediction = TRACER.model_call(
+                "RxnIM.predict_image_file",
+                "get_reaction_agent.py › get_reaction_withatoms_correctR(gpt5) › get_reaction_full",
+                {"image_path": image_file, "molnextr": True, "ocr": True},
+                lambda img=image_file: model1.predict_image_file(img, molnextr=True, ocr=True),
+            )
         return raw_prediction
 
     input2 = get_reaction_full(image_path)
@@ -651,17 +694,22 @@ def get_reaction_withatoms_correctR_OS(
     ]
 
     # 调用 GPT 接口（带重试机制）
-    response = retry_api_call(
-        client.chat.completions.create,
-        max_retries=5,
-        base_delay=3,
-        backoff_factor=2,
-        model=model_name,
-        temperature=0,
-        #response_format={'type': 'json_object'},  # vLLM 不支持同时使用 response_format 和 tools
-        messages=messages,
-        tools=tools,
-        tool_choice="auto",
+    response = TRACER.llm_call(
+        f"get_reaction_withatoms_correctR_OS [tool-select] / {model_name} [retry]",
+        "get_reaction_agent.py › get_reaction_withatoms_correctR_OS",
+        {"model": model_name, "messages": messages, "tools": tools},
+        lambda: retry_api_call(
+            client.chat.completions.create,
+            max_retries=5,
+            base_delay=3,
+            backoff_factor=2,
+            model=model_name,
+            temperature=0,
+            #response_format={'type': 'json_object'},  # vLLM 不支持同时使用 response_format 和 tools
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+        ),
     )
     
     # Step 1: 工具映射表
@@ -726,15 +774,20 @@ def get_reaction_withatoms_correctR_OS(
     }
 
     # Generate new response（带重试机制）
-    response = retry_api_call(
-        client.chat.completions.create,
-        max_retries=5,
-        base_delay=3,
-        backoff_factor=2,
-        model=completion_payload["model"],
-        messages=completion_payload["messages"],
-        #response_format={'type': 'json_object'},  # vLLM 可能不支持
-        temperature=0
+    response = TRACER.llm_call(
+        f"get_reaction_withatoms_correctR_OS [compile] / {model_name} [retry]",
+        "get_reaction_agent.py › get_reaction_withatoms_correctR_OS",
+        {"model": completion_payload["model"], "messages": completion_payload["messages"]},
+        lambda: retry_api_call(
+            client.chat.completions.create,
+            max_retries=5,
+            base_delay=3,
+            backoff_factor=2,
+            model=completion_payload["model"],
+            messages=completion_payload["messages"],
+            #response_format={'type': 'json_object'},  # vLLM 可能不支持
+            temperature=0
+        ),
     )
 
     # 获取 GPT 生成的结果（支持从包含思考过程的文本中提取）
@@ -742,7 +795,7 @@ def get_reaction_withatoms_correctR_OS(
     if not response.choices:
         return {}
     raw_content = response.choices[0].message.content
-    
+
     try:
         # 首先尝试直接解析
         gpt_output = json.loads(raw_content)
@@ -751,7 +804,7 @@ def get_reaction_withatoms_correctR_OS(
         # 如果直接解析失败，使用智能提取函数
         print(f"WARNING [OS]: Direct JSON parsing failed, trying to extract JSON from text...")
         gpt_output = extract_json_from_text_with_reasoning(raw_content)
-        
+
         if gpt_output is not None:
             print(f"DEBUG [OS]: Successfully extracted JSON from text (with reasoning support)")
         else:
@@ -761,7 +814,7 @@ def get_reaction_withatoms_correctR_OS(
                 f"Could not parse JSON from model response. Content may not be valid JSON.",
                 raw_content, 0
             )
-    
+
     print(f"gpt_output_rxn:{gpt_output}")
 
     def get_reaction_full(image_path: str) -> dict:
@@ -772,7 +825,12 @@ def get_reaction_withatoms_correctR_OS(
 
         image_file = image_path
         with CUDA_MODEL_LOCK:
-            raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
+            raw_prediction = TRACER.model_call(
+                "RxnIM.predict_image_file",
+                "get_reaction_agent.py › get_reaction_withatoms_correctR_OS › get_reaction_full",
+                {"image_path": image_file, "molnextr": True, "ocr": True},
+                lambda img=image_file: model1.predict_image_file(img, molnextr=True, ocr=True),
+            )
         return raw_prediction
 
     input2 = get_reaction_full(image_path)

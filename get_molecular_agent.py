@@ -25,6 +25,7 @@ import copy
 from typing import Optional
 import time
 from _model_lock import CUDA_MODEL_LOCK
+from trace_logger import TRACER
 
 
 def retry_api_call(func, max_retries=3, base_delay=2, backoff_factor=2, *args, **kwargs):
@@ -78,10 +79,15 @@ def get_multi_molecular(image_path: str) -> list:
     '''Returns a list of reactions extracted from the image.'''
     # 打开图像文件
     image = Image.open(image_path).convert('RGB')
-    
+
     # 将图像作为输入传递给模型
     with CUDA_MODEL_LOCK:
-        coref_results = model.extract_molecule_corefs_from_figures([image])
+        coref_results = TRACER.model_call(
+            "ChemIE.extract_molecule_corefs_from_figures",
+            "get_molecular_agent.py › get_multi_molecular",
+            {"n_images": 1},
+            lambda img=image: model.extract_molecule_corefs_from_figures([img]),
+        )
     #print(f"coref_results:{coref_results}")
     for item in coref_results:
         for bbox in item.get("bboxes", []):
@@ -96,10 +102,15 @@ def get_multi_molecular_text_to_correct(image_path: str) -> list:
     '''Returns a list of reactions extracted from the image.'''
     # 打开图像文件
     image = Image.open(image_path).convert('RGB')
-    
+
     # 将图像作为输入传递给模型
     with CUDA_MODEL_LOCK:
-        coref_results = model.extract_molecule_corefs_from_figures([image])
+        coref_results = TRACER.model_call(
+            "ChemIE.extract_molecule_corefs_from_figures",
+            "get_molecular_agent.py › get_multi_molecular_text_to_correct",
+            {"n_images": 1},
+            lambda img=image: model.extract_molecule_corefs_from_figures([img]),
+        )
     for item in coref_results:
         for bbox in item.get("bboxes", []):
             for key in ["category", "bbox", "molfile", "symbols", 'atoms', "bonds", 'category_id', 'score', 'corefs']: #'atoms'
@@ -113,10 +124,15 @@ def get_multi_molecular_text_to_correct_withatoms(image_path: str) -> list:
     '''Returns a list of reactions extracted from the image.'''
     # 打开图像文件
     image = Image.open(image_path).convert('RGB')
-    
+
     # 将图像作为输入传递给模型
     with CUDA_MODEL_LOCK:
-        coref_results = model.extract_molecule_corefs_from_figures([image])
+        coref_results = TRACER.model_call(
+            "ChemIE.extract_molecule_corefs_from_figures",
+            "get_molecular_agent.py › get_multi_molecular_text_to_correct_withatoms",
+            {"n_images": 1},
+            lambda img=image: model.extract_molecule_corefs_from_figures([img]),
+        )
     for item in coref_results:
         for bbox in item.get("bboxes", []):
             for key in ["coords","edges","molfile", 'atoms', "bonds", 'category_id', 'score', 'corefs']: #'atoms'
@@ -192,29 +208,35 @@ def process_reaction_image_with_multiple_products_and_text(image_path: str) -> d
     ]
 
     # 调用 GPT 接口
-    response = client.chat.completions.create(
-    model = 'gpt-4o',
-    temperature = 0,
-    response_format={ 'type': 'json_object' },
-    messages = [
-        {'role': 'system', 'content': 'You are a helpful assistant.'},
-        {
-            'role': 'user',
-            'content': [
+    response = TRACER.llm_call(
+        "process_reaction_...text [tool-select] / gpt-4o",
+        "get_molecular_agent.py › process_reaction_image_with_multiple_products_and_text",
+        {"model": "gpt-4o", "messages": messages, "tools": tools},
+        lambda: client.chat.completions.create(
+            model='gpt-4o',
+            temperature=0,
+            response_format={'type': 'json_object'},
+            messages=[
+                {'role': 'system', 'content': 'You are a helpful assistant.'},
                 {
-                    'type': 'text',
-                    'text': prompt
-                },
-                {
-                    'type': 'image_url',
-                    'image_url': {
-                        'url': f'data:image/png;base64,{base64_image}'
-                    }
-                }
-            ]},
-    ],
-    tools = tools)
-    
+                    'role': 'user',
+                    'content': [
+                        {
+                            'type': 'text',
+                            'text': prompt
+                        },
+                        {
+                            'type': 'image_url',
+                            'image_url': {
+                                'url': f'data:image/png;base64,{base64_image}'
+                            }
+                        }
+                    ]},
+            ],
+            tools=tools,
+        ),
+    )
+
 # Step 1: 工具映射表
     TOOL_MAP = {
         'get_multi_molecular_text_to_correct_withatoms': get_multi_molecular_text_to_correct_withatoms,
@@ -231,15 +253,15 @@ def process_reaction_image_with_multiple_products_and_text(image_path: str) -> d
         tool_name = tool_call.function.name
         tool_arguments = tool_call.function.arguments
         tool_call_id = tool_call.id
-        
+
         tool_args = json.loads(tool_arguments)
-        
+
         if tool_name in TOOL_MAP:
             # 调用工具并获取结果
             tool_result = TOOL_MAP[tool_name](image_path)
         else:
             raise ValueError(f"Unknown tool called: {tool_name}")
-        
+
         # 保存每个工具调用结果
         results.append({
             'role': 'tool',
@@ -278,15 +300,20 @@ def process_reaction_image_with_multiple_products_and_text(image_path: str) -> d
     }
 
 # Generate new response
-    response = client.chat.completions.create(
-        model=completion_payload["model"],
-        messages=completion_payload["messages"],
-        response_format={ 'type': 'json_object' },
-        temperature=0
+    response = TRACER.llm_call(
+        "process_reaction_...text [compile] / gpt-4o",
+        "get_molecular_agent.py › process_reaction_image_with_multiple_products_and_text",
+        {"model": completion_payload["model"], "messages": completion_payload["messages"]},
+        lambda: client.chat.completions.create(
+            model=completion_payload["model"],
+            messages=completion_payload["messages"],
+            response_format={'type': 'json_object'},
+            temperature=0,
+        ),
     )
 
 
-    
+
     # 获取 GPT 生成的结果
     if not response.choices:
         return {}
@@ -300,7 +327,12 @@ def process_reaction_image_with_multiple_products_and_text(image_path: str) -> d
 
         # 将图像作为输入传递给模型
         with CUDA_MODEL_LOCK:
-            coref_results = model.extract_molecule_corefs_from_figures([image])
+            coref_results = TRACER.model_call(
+                "ChemIE.extract_molecule_corefs_from_figures",
+                "get_molecular_agent.py › process_reaction_..._text › get_multi_molecular",
+                {"n_images": 1},
+                lambda img=image: model.extract_molecule_corefs_from_figures([img]),
+            )
         return coref_results
 
 
@@ -377,12 +409,19 @@ def process_reaction_image_with_multiple_products_and_text(image_path: str) -> d
 
         return input_data
 
-    updated_data = update_smiles_and_molfile(input2_updated, _convert_graph_to_smiles)
+    def _traced_g2s_text(coords, symbols, edges, **kw):
+        return TRACER.model_call(
+            "Graph2SMILES._convert_graph_to_smiles",
+            "get_molecular_agent.py › process_reaction_..._text › update_smiles_and_molfile",
+            {"n_symbols": len(symbols), "symbols_sample": symbols[:4]},
+            lambda: _convert_graph_to_smiles(coords, symbols, edges, **kw),
+        )
+    updated_data = update_smiles_and_molfile(input2_updated, _traced_g2s_text)
 
     return updated_data
 
-    
-    
+
+
 
 
 
@@ -450,29 +489,35 @@ def process_reaction_image_with_multiple_products_and_text_correctR(image_path: 
     ]
 
     # 调用 GPT 接口
-    response = client.chat.completions.create(
-    model = 'gpt-4o',
-    temperature = 0,
-    response_format={ 'type': 'json_object' },
-    messages = [
-        {'role': 'system', 'content': 'You are a helpful assistant.'},
-        {
-            'role': 'user',
-            'content': [
+    response = TRACER.llm_call(
+        "process_reaction_...correctR [tool-select] / gpt-4o",
+        "get_molecular_agent.py › process_reaction_image_with_multiple_products_and_text_correctR",
+        {"model": "gpt-4o", "messages": messages, "tools": tools},
+        lambda: client.chat.completions.create(
+            model='gpt-4o',
+            temperature=0,
+            response_format={'type': 'json_object'},
+            messages=[
+                {'role': 'system', 'content': 'You are a helpful assistant.'},
                 {
-                    'type': 'text',
-                    'text': prompt
-                },
-                {
-                    'type': 'image_url',
-                    'image_url': {
-                        'url': f'data:image/png;base64,{base64_image}'
-                    }
-                }
-            ]},
-    ],
-    tools = tools)
-    
+                    'role': 'user',
+                    'content': [
+                        {
+                            'type': 'text',
+                            'text': prompt
+                        },
+                        {
+                            'type': 'image_url',
+                            'image_url': {
+                                'url': f'data:image/png;base64,{base64_image}'
+                            }
+                        }
+                    ]},
+            ],
+            tools=tools,
+        ),
+    )
+
 # Step 1: 工具映射表
     TOOL_MAP = {
         'get_multi_molecular_text_to_correct_withatoms': get_multi_molecular_text_to_correct_withatoms,
@@ -489,15 +534,15 @@ def process_reaction_image_with_multiple_products_and_text_correctR(image_path: 
         tool_name = tool_call.function.name
         tool_arguments = tool_call.function.arguments
         tool_call_id = tool_call.id
-        
+
         tool_args = json.loads(tool_arguments)
-        
+
         if tool_name in TOOL_MAP:
             # 调用工具并获取结果
             tool_result = TOOL_MAP[tool_name](image_path)
         else:
             raise ValueError(f"Unknown tool called: {tool_name}")
-        
+
         # 保存每个工具调用结果
         results.append({
             'role': 'tool',
@@ -536,15 +581,20 @@ def process_reaction_image_with_multiple_products_and_text_correctR(image_path: 
     }
 
 # Generate new response
-    response = client.chat.completions.create(
-        model=completion_payload["model"],
-        messages=completion_payload["messages"],
-        response_format={ 'type': 'json_object' },
-        temperature=0
+    response = TRACER.llm_call(
+        "process_reaction_...correctR [compile] / gpt-4o",
+        "get_molecular_agent.py › process_reaction_image_with_multiple_products_and_text_correctR",
+        {"model": completion_payload["model"], "messages": completion_payload["messages"]},
+        lambda: client.chat.completions.create(
+            model=completion_payload["model"],
+            messages=completion_payload["messages"],
+            response_format={'type': 'json_object'},
+            temperature=0,
+        ),
     )
 
 
-    
+
     # 获取 GPT 生成的结果
     if not response.choices:
         return {}
@@ -559,7 +609,12 @@ def process_reaction_image_with_multiple_products_and_text_correctR(image_path: 
 
         # 将图像作为输入传递给模型
         with CUDA_MODEL_LOCK:
-            coref_results = model.extract_molecule_corefs_from_figures([image])
+            coref_results = TRACER.model_call(
+                "ChemIE.extract_molecule_corefs_from_figures",
+                "get_molecular_agent.py › process_reaction_..._correctR › get_multi_molecular",
+                {"n_images": 1},
+                lambda img=image: model.extract_molecule_corefs_from_figures([img]),
+            )
         return coref_results
 
 
@@ -636,7 +691,14 @@ def process_reaction_image_with_multiple_products_and_text_correctR(image_path: 
 
         return input_data
 
-    updated_data = update_smiles_and_molfile(input2_updated, _convert_graph_to_smiles)
+    def _traced_g2s_correctR(coords, symbols, edges, **kw):
+        return TRACER.model_call(
+            "Graph2SMILES._convert_graph_to_smiles",
+            "get_molecular_agent.py › process_reaction_..._correctR › update_smiles_and_molfile",
+            {"n_symbols": len(symbols), "symbols_sample": symbols[:4]},
+            lambda: _convert_graph_to_smiles(coords, symbols, edges, **kw),
+        )
+    updated_data = update_smiles_and_molfile(input2_updated, _traced_g2s_correctR)
     print(f"mol_agent_output:{updated_data}")
 
     return updated_data
@@ -704,29 +766,35 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR(image_p
     ]
 
     # 调用 GPT 接口
-    response = client.chat.completions.create(
-    model = 'gpt-5-mini',
-    #temperature = 0,
-    response_format={ 'type': 'json_object' },
-    messages = [
-        {'role': 'system', 'content': 'You are a helpful assistant.'},
-        {
-            'role': 'user',
-            'content': [
+    response = TRACER.llm_call(
+        "process_reaction_...correctmultiR [tool-select] / gpt-5-mini",
+        "get_molecular_agent.py › process_reaction_image_with_multiple_products_and_text_correctmultiR",
+        {"model": "gpt-5-mini", "messages": messages, "tools": tools},
+        lambda: client.chat.completions.create(
+            model='gpt-5-mini',
+            #temperature = 0,
+            response_format={'type': 'json_object'},
+            messages=[
+                {'role': 'system', 'content': 'You are a helpful assistant.'},
                 {
-                    'type': 'text',
-                    'text': prompt
-                },
-                {
-                    'type': 'image_url',
-                    'image_url': {
-                        'url': f'data:image/png;base64,{base64_image}'
-                    }
-                }
-            ]},
-    ],
-    tools = tools)
-    
+                    'role': 'user',
+                    'content': [
+                        {
+                            'type': 'text',
+                            'text': prompt
+                        },
+                        {
+                            'type': 'image_url',
+                            'image_url': {
+                                'url': f'data:image/png;base64,{base64_image}'
+                            }
+                        }
+                    ]},
+            ],
+            tools=tools,
+        ),
+    )
+
 # Step 1: 工具映射表
     TOOL_MAP = {
         'get_multi_molecular_text_to_correct_withatoms': get_multi_molecular_text_to_correct_withatoms,
@@ -743,15 +811,15 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR(image_p
         tool_name = tool_call.function.name
         tool_arguments = tool_call.function.arguments
         tool_call_id = tool_call.id
-        
+
         tool_args = json.loads(tool_arguments)
-        
+
         if tool_name in TOOL_MAP:
             # 调用工具并获取结果
             tool_result = TOOL_MAP[tool_name](image_path)
         else:
             raise ValueError(f"Unknown tool called: {tool_name}")
-        
+
         # 保存每个工具调用结果
         results.append({
             'role': 'tool',
@@ -790,15 +858,20 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR(image_p
     }
 
 # Generate new response
-    response = client.chat.completions.create(
-        model=completion_payload["model"],
-        messages=completion_payload["messages"],
-        response_format={ 'type': 'json_object' },
-        #temperature=0
+    response = TRACER.llm_call(
+        "process_reaction_...correctmultiR [compile] / gpt-5-mini",
+        "get_molecular_agent.py › process_reaction_image_with_multiple_products_and_text_correctmultiR",
+        {"model": completion_payload["model"], "messages": completion_payload["messages"]},
+        lambda: client.chat.completions.create(
+            model=completion_payload["model"],
+            messages=completion_payload["messages"],
+            response_format={'type': 'json_object'},
+            #temperature=0
+        ),
     )
 
 
-    
+
     # 获取 GPT 生成的结果
     if not response.choices:
         return {}
@@ -813,7 +886,12 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR(image_p
 
         # 将图像作为输入传递给模型
         with CUDA_MODEL_LOCK:
-            coref_results = model.extract_molecule_corefs_from_figures([image])
+            coref_results = TRACER.model_call(
+                "ChemIE.extract_molecule_corefs_from_figures",
+                "get_molecular_agent.py › process_reaction_..._correctmultiR › get_multi_molecular",
+                {"n_images": 1},
+                lambda img=image: model.extract_molecule_corefs_from_figures([img]),
+            )
         return coref_results
 
 
@@ -904,7 +982,14 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR(image_p
 
         return input_data
 
-    updated_data = update_smiles_and_molfile(input2_updated, _convert_graph_to_smiles)
+    def _traced_g2s_correctmultiR(coords, symbols, edges, **kw):
+        return TRACER.model_call(
+            "Graph2SMILES._convert_graph_to_smiles",
+            "get_molecular_agent.py › process_reaction_..._correctmultiR › update_smiles_and_molfile",
+            {"n_symbols": len(symbols), "symbols_sample": symbols[:4]},
+            lambda: _convert_graph_to_smiles(coords, symbols, edges, **kw),
+        )
+    updated_data = update_smiles_and_molfile(input2_updated, _traced_g2s_correctmultiR)
     print(f"mol_agent_output:{updated_data}")
 
     return updated_data
@@ -984,17 +1069,22 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR_OS(
     ]
 
     # 调用 GPT 接口（带重试机制）
-    response = retry_api_call(
-        client.chat.completions.create,
-        max_retries=5,
-        base_delay=3,
-        backoff_factor=2,
-        model=model_name,
-        temperature=0,
-        #response_format={'type': 'json_object'},  # vLLM 不支持同时使用 response_format 和 tools
-        messages=messages,
-        tools=tools,
-        tool_choice="auto",
+    response = TRACER.llm_call(
+        f"process_reaction_...correctmultiR_OS [tool-select] / {model_name} [retry]",
+        "get_molecular_agent.py › process_reaction_image_with_multiple_products_and_text_correctmultiR_OS",
+        {"model": model_name, "messages": messages, "tools": tools},
+        lambda: retry_api_call(
+            client.chat.completions.create,
+            max_retries=5,
+            base_delay=3,
+            backoff_factor=2,
+            model=model_name,
+            temperature=0,
+            #response_format={'type': 'json_object'},  # vLLM 不支持同时使用 response_format 和 tools
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+        ),
     )
     
     # Step 1: 工具映射表
@@ -1059,15 +1149,20 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR_OS(
     }
 
     # Generate new response（带重试机制）
-    response = retry_api_call(
-        client.chat.completions.create,
-        max_retries=5,
-        base_delay=3,
-        backoff_factor=2,
-        model=completion_payload["model"],
-        messages=completion_payload["messages"],
-        #response_format={'type': 'json_object'},  # vLLM 可能不支持
-        temperature=0
+    response = TRACER.llm_call(
+        f"process_reaction_...correctmultiR_OS [compile] / {model_name} [retry]",
+        "get_molecular_agent.py › process_reaction_image_with_multiple_products_and_text_correctmultiR_OS",
+        {"model": completion_payload["model"], "messages": completion_payload["messages"]},
+        lambda: retry_api_call(
+            client.chat.completions.create,
+            max_retries=5,
+            base_delay=3,
+            backoff_factor=2,
+            model=completion_payload["model"],
+            messages=completion_payload["messages"],
+            #response_format={'type': 'json_object'},  # vLLM 可能不支持
+            temperature=0,
+        ),
     )
 
     # 获取 GPT 生成的结果（支持从包含思考过程的文本中提取）
@@ -1105,7 +1200,12 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR_OS(
 
         # 将图像作为输入传递给模型
         with CUDA_MODEL_LOCK:
-            coref_results = model.extract_molecule_corefs_from_figures([image])
+            coref_results = TRACER.model_call(
+                "ChemIE.extract_molecule_corefs_from_figures",
+                "get_molecular_agent.py › process_reaction_..._correctmultiR_OS › get_multi_molecular",
+                {"n_images": 1},
+                lambda img=image: model.extract_molecule_corefs_from_figures([img]),
+            )
         return coref_results
 
     coref_results = get_multi_molecular(image_path)
@@ -1192,7 +1292,14 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR_OS(
 
         return input_data
 
-    updated_data = update_smiles_and_molfile(input2_updated, _convert_graph_to_smiles)
+    def _traced_g2s_correctmultiR_OS(coords, symbols, edges, **kw):
+        return TRACER.model_call(
+            "Graph2SMILES._convert_graph_to_smiles",
+            "get_molecular_agent.py › process_reaction_..._correctmultiR_OS › update_smiles_and_molfile",
+            {"n_symbols": len(symbols), "symbols_sample": symbols[:4]},
+            lambda: _convert_graph_to_smiles(coords, symbols, edges, **kw),
+        )
+    updated_data = update_smiles_and_molfile(input2_updated, _traced_g2s_correctmultiR_OS)
     print(f"mol_agent_output:{updated_data}")
 
     return updated_data

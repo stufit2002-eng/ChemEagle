@@ -33,6 +33,7 @@ import re
 import time
 from openai import InternalServerError, RateLimitError, APIError
 from _model_lock import CUDA_MODEL_LOCK
+from trace_logger import TRACER
 
 
 
@@ -586,7 +587,12 @@ def get_multi_molecular_full(image_path: str) -> list:
     # 将图像作为输入传递给模型
     #coref_results = process_reaction_image_with_multiple_products_and_text_correctmultiR(image_path)
     with CUDA_MODEL_LOCK:
-        coref_results = model.extract_molecule_corefs_from_figures([image])
+        coref_results = TRACER.model_call(
+            "ChemIE.extract_molecule_corefs_from_figures",
+            "get_R_group_sub_agent.py › get_multi_molecular_full",
+            {"image_path": image_path},
+            lambda: model.extract_molecule_corefs_from_figures([image]),
+        )
     for item in coref_results:
         for bbox in item.get("bboxes", []):
             for key in ["category", "molfile", "symbols", 'atoms', "bonds", 'category_id', 'score', 'corefs',"coords","edges"]: #'atoms'
@@ -696,7 +702,12 @@ def get_reaction_full(image_path: str) -> dict:
     '''
     image_file = image_path
     with CUDA_MODEL_LOCK:
-        raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
+        raw_prediction = TRACER.model_call(
+            "RxnIM.predict_image_file",
+            "get_R_group_sub_agent.py › get_reaction_full",
+            {"image_path": image_file, "molnextr": True, "ocr": True},
+            lambda: model1.predict_image_file(image_file, molnextr=True, ocr=True),
+        )
     #raw_prediction = get_reaction_withatoms_correctR(image_path)
     return raw_prediction
 
