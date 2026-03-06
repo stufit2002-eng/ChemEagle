@@ -1,46 +1,47 @@
-import sys
-import torch
+from __future__ import annotations
+
+import base64
+import copy
+import io
 import json
-from chemietoolkit import ChemIEToolkit,utils
+import os
+import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
+
 import cv2
 import numpy as np
 from PIL import Image
-import json
-from get_molecular_agent import process_reaction_image_with_multiple_products_and_text_correctR, process_reaction_image_with_multiple_products_and_text_correctmultiR, process_reaction_image_with_multiple_products_and_text_correctmultiR_OS
+
+from chemietoolkit import utils
+from molnextr.chemistry import _convert_graph_to_smiles
+
+from get_molecular_agent import (
+    process_reaction_image_with_multiple_products_and_text_correctR,
+    process_reaction_image_with_multiple_products_and_text_correctmultiR,
+    process_reaction_image_with_multiple_products_and_text_correctmultiR_OS,
+)
 from get_reaction_agent import get_reaction_withatoms_correctR, get_reaction_withatoms_correctR_OS
-import sys
-from rxnim import RxnIM
-import json
-import base64
-torch.backends.cudnn.benchmark = True
-_DEVICE = torch.device('cuda')
-model = ChemIEToolkit(device=_DEVICE)
-ckpt_path = "./rxn.ckpt"
-model1 = RxnIM(ckpt_path, device=_DEVICE)
-device = _DEVICE
-import base64
-import torch
-import json
-from PIL import Image
-import numpy as np
-from openai import AzureOpenAI,  OpenAI
-from typing import Optional
-import copy
-from molnextr.chemistry import _convert_graph_to_smiles 
-import os
-import io
-import re
-import time
-from openai import InternalServerError, RateLimitError, APIError
-from _model_lock import CUDA_MODEL_LOCK
+from _shared_models import (
+    encode_image,
+    get_azure_client,
+    get_chemiie_toolkit,
+    get_coref_results,
+    get_raw_prediction,
+    read_prompt,
+    resolve_os_client,
+    retry_api_call,
+)
 
+# Lazy references kept for legacy code paths that reference `model` / `model1`
+# directly; they resolve via _shared_models on first access.
+def _model():
+    return get_chemiie_toolkit()
 
-
-API_KEY = os.getenv("API_KEY")
-if not API_KEY:
-    raise ValueError("Please set API_KEY")
-AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
-API_VERSION = os.getenv("API_VERSION")
+def _model1():
+    from _shared_models import get_rxnim  # noqa: PLC0415
+    return get_rxnim()
 
 
 def normalize_product_variant_output(data: dict) -> dict:
@@ -128,54 +129,7 @@ def normalize_product_variant_output(data: dict) -> dict:
     }
 
 
-def retry_api_call(func, max_retries=3, base_delay=2, backoff_factor=2, *args, **kwargs):
-    """
-    通用的 API 调用重试函数，支持指数退避策略。
-    
-    Args:
-        func: 要调用的函数
-        max_retries: 最大重试次数
-        base_delay: 基础延迟时间（秒）
-        backoff_factor: 退避因子（每次重试延迟时间 = base_delay * backoff_factor^attempt）
-        *args, **kwargs: 传递给 func 的参数
-    
-    Returns:
-        func 的返回值
-    
-    Raises:
-        最后一次尝试的异常
-    """
-    last_exception = None
-    
-    for attempt in range(max_retries):
-        try:
-            return func(*args, **kwargs)
-        except (InternalServerError, RateLimitError, APIError) as e:
-            last_exception = e
-            error_code = getattr(e, 'status_code', None) or getattr(e, 'code', None)
-            error_message = str(e)
-            
-            # 检查是否是 503 错误或其他可重试的错误
-            if error_code == 503 or 'overloaded' in error_message.lower() or '503' in error_message:
-                if attempt < max_retries - 1:
-                    delay = base_delay * (backoff_factor ** attempt)
-                    print(f"⚠️ API 调用失败 (503/过载)，第 {attempt + 1}/{max_retries} 次尝试。{delay:.1f} 秒后重试...")
-                    time.sleep(delay)
-                    continue
-                else:
-                    print(f"❌ API 调用失败，已达到最大重试次数 ({max_retries})")
-                    raise
-            else:
-                # 其他类型的错误，直接抛出
-                raise
-        except Exception as e:
-            # 其他未知错误，直接抛出
-            raise
-    
-    # 如果所有重试都失败了
-    if last_exception:
-        raise last_exception
-    raise RuntimeError("API 调用失败，未知错误")
+# retry_api_call is imported from _shared_models above.
 
 
 def draw_mol_bboxes(image_path, coref_results, output_path=None):
@@ -480,24 +434,27 @@ def parse_coref_data_with_fallback_with_box(data):
 
 
 ############################### MOl
-_process_multi_molecular_cache = {}
+_process_multi_molecular_cache: dict = {}
+_pmc_path_locks: dict = {}
+_pmc_meta_lock = threading.Lock()
 
 def get_cached_multi_molecular(image_path: str):
+    """Return cached result of process_reaction_image_with_multiple_products_and_text_correctmultiR.
+
+    Thread-safe: concurrent callers with the same path wait for the first
+    computation rather than duplicating it.
     """
-    只会对同一个 image_path 真正调用一次
-    process_reaction_image_with_multiple_products_and_text_correctR
-    并缓存结果。
-    """
-    image = Image.open(image_path).convert('RGB')
-    image = np.array(image)
-    
-    if image_path not in _process_multi_molecular_cache:
-        ##print(f"[get_cached_multi_molecular] Processing image: {image_path}")
-        _process_multi_molecular_cache[image_path] = (
-            process_reaction_image_with_multiple_products_and_text_correctmultiR(image_path)
-            ################################model.extract_molecule_corefs_from_figures([image])#############################################################################################
+    if image_path in _process_multi_molecular_cache:
+        return _process_multi_molecular_cache[image_path]
+    with _pmc_meta_lock:
+        if image_path not in _pmc_path_locks:
+            _pmc_path_locks[image_path] = threading.Lock()
+        img_lock = _pmc_path_locks[image_path]
+    with img_lock:
+        if image_path not in _process_multi_molecular_cache:
+            _process_multi_molecular_cache[image_path] = (
+                process_reaction_image_with_multiple_products_and_text_correctmultiR(image_path)
             )
-        ##print(f"original output: {model.extract_molecule_corefs_from_figures([image])}")
     return _process_multi_molecular_cache[image_path]
 
 
@@ -533,21 +490,18 @@ def get_multi_molecular_text_to_correct(image_path: str) -> list:
 # Azure variant and break the deduplication that the cache provides.
 
 def get_cached_multi_molecular_OS(image_path: str):
-    """
-    只会对同一个 image_path 真正调用一次
-    process_reaction_image_with_multiple_products_and_text_correctR
-    并缓存结果。
-    """
-    image = Image.open(image_path).convert('RGB')
-    image = np.array(image)
-    
-    if image_path not in _process_multi_molecular_cache:
-        ##print(f"[get_cached_multi_molecular] Processing image: {image_path}")
-        _process_multi_molecular_cache[image_path] = (
-            process_reaction_image_with_multiple_products_and_text_correctmultiR_OS(image_path)
-            #######model.extract_molecule_corefs_from_figures([image])
+    """Thread-safe cached OS variant of get_cached_multi_molecular."""
+    if image_path in _process_multi_molecular_cache:
+        return _process_multi_molecular_cache[image_path]
+    with _pmc_meta_lock:
+        if image_path not in _pmc_path_locks:
+            _pmc_path_locks[image_path] = threading.Lock()
+        img_lock = _pmc_path_locks[image_path]
+    with img_lock:
+        if image_path not in _process_multi_molecular_cache:
+            _process_multi_molecular_cache[image_path] = (
+                process_reaction_image_with_multiple_products_and_text_correctmultiR_OS(image_path)
             )
-        ##print(f"original output: {model.extract_molecule_corefs_from_figures([image])}")
     return _process_multi_molecular_cache[image_path]
 
 
@@ -579,45 +533,39 @@ def get_multi_molecular_text_to_correct_OS(image_path: str) -> list:
 
 
 def get_multi_molecular_full(image_path: str) -> list:
-    '''Returns a list of reactions extracted from the image.'''
-    # 打开图像文件
-    image = Image.open(image_path).convert('RGB')
-    
-    # 将图像作为输入传递给模型
-    #coref_results = process_reaction_image_with_multiple_products_and_text_correctmultiR(image_path)
-    with CUDA_MODEL_LOCK:
-        coref_results = model.extract_molecule_corefs_from_figures([image])
+    """Returns parsed coref results for all molecules in the image (cached)."""
+    import copy as _copy  # noqa: PLC0415
+    coref_results = _copy.deepcopy(get_coref_results(image_path))
     for item in coref_results:
         for bbox in item.get("bboxes", []):
-            for key in ["category", "molfile", "symbols", 'atoms', "bonds", 'category_id', 'score', 'corefs',"coords","edges"]: #'atoms'
-                bbox.pop(key, None)  # 安全地移除键
-
+            for key in ("category", "molfile", "symbols", "atoms", "bonds",
+                        "category_id", "score", "corefs", "coords", "edges"):
+                bbox.pop(key, None)
     if not coref_results:
         print("WARNING: get_multi_molecular_full got empty coref_results, returning empty")
         return []
-    data = coref_results[0]
-    parsed = parse_coref_data_with_fallback(data)
-
-    
-    ##print(f"coref_results:{json.dumps(parsed)}")
-    #return json.dumps(parsed)
-    return parsed
+    return parse_coref_data_with_fallback(coref_results[0])
 #get_multi_molecular_text_to_correct('./acs.joc.2c00176 example 1.png')
 
 
 
 ############################### Rxn
-_raw_results_cache = {}
+_raw_results_cache: dict = {}
+_rrc_path_locks: dict = {}
+_rrc_meta_lock = threading.Lock()
+
 
 def get_cached_raw_results(image_path: str):
-    """
-    调用一次 get_reaction_withatoms_correctR 并缓存结果，
-    后续复用同一份 raw_results。
-    """
-    if image_path not in _raw_results_cache:
-        #print(f"[get_cached_raw_results] Processing image: {image_path}")
-        _raw_results_cache[image_path] = get_reaction_withatoms_correctR(image_path)
-        ###############################_raw_results_cache[image_path]= model1.predict_image_file(image_path, molnextr=True, ocr=True)####################################################################
+    """Call get_reaction_withatoms_correctR once per path (thread-safe cache)."""
+    if image_path in _raw_results_cache:
+        return _raw_results_cache[image_path]
+    with _rrc_meta_lock:
+        if image_path not in _rrc_path_locks:
+            _rrc_path_locks[image_path] = threading.Lock()
+        img_lock = _rrc_path_locks[image_path]
+    with img_lock:
+        if image_path not in _raw_results_cache:
+            _raw_results_cache[image_path] = get_reaction_withatoms_correctR(image_path)
     return _raw_results_cache[image_path]
 
 
@@ -663,14 +611,16 @@ def get_reaction(image_path: str) -> dict:
 ############################### Rxn_OS
 
 def get_cached_raw_results_OS(image_path: str):
-    """
-    调用一次 get_reaction_withatoms_correctR 并缓存结果，
-    后续复用同一份 raw_results。
-    """
-    if image_path not in _raw_results_cache:
-        #print(f"[get_cached_raw_results] Processing image: {image_path}")
-        _raw_results_cache[image_path]= get_reaction_withatoms_correctR_OS(image_path)
-        ######_raw_results_cache[image_path]= model1.predict_image_file(image_path, molnextr=True, ocr=True)####################################################################
+    """Thread-safe cached OS variant of get_cached_raw_results."""
+    if image_path in _raw_results_cache:
+        return _raw_results_cache[image_path]
+    with _rrc_meta_lock:
+        if image_path not in _rrc_path_locks:
+            _rrc_path_locks[image_path] = threading.Lock()
+        img_lock = _rrc_path_locks[image_path]
+    with img_lock:
+        if image_path not in _raw_results_cache:
+            _raw_results_cache[image_path] = get_reaction_withatoms_correctR_OS(image_path)
     return _raw_results_cache[image_path]
 
 
@@ -691,14 +641,10 @@ def get_reaction_OS(image_path: str) -> dict:
 
 def get_reaction_full(image_path: str) -> dict:
     '''
-    Returns a structured dictionary of reactions extracted from the image, 
+    Returns a structured dictionary of reactions extracted from the image,
     including only reactants, conditions, and products with their smiles, bbox, or text.
     '''
-    image_file = image_path
-    with CUDA_MODEL_LOCK:
-        raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
-    #raw_prediction = get_reaction_withatoms_correctR(image_path)
-    return raw_prediction
+    return get_raw_prediction(image_path)
 
 def get_full_reaction(image_path: str) -> dict:
     '''
@@ -806,44 +752,18 @@ def get_full_reaction_template(image_path: str) -> dict:
     Returns a structured dictionary of reactions extracted from the image,
     including reactants, conditions, and products, with their smiles, text, and bbox.
     '''
-    image = Image.open(image_path).convert('RGB')
-    image_file = image_path
-    with CUDA_MODEL_LOCK:
-        raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
-    ####################raw_prediction = get_reaction_withatoms_correctR(image_path)###############################################################################################
-    for reaction in raw_prediction:
-        for section in ("reactants", "products", "conditions"):
-            for entry in reaction.get(section, []):
-                # 1) 保留 coords 三位小数
-                coords = entry.get("coords")
-                if isinstance(coords, list):
-                    entry["coords"] = [
-                        [round(val, 3) for val in point]
-                        for point in coords
-                    ]
-                # 2) 删除不需要的字段
-                for key in ("molfile", "atoms", "bonds"):
-                    entry.pop(key, None)
-
-    #raw_prediction =json.dumps(raw_prediction)
-    print(f"raw_prediction:{raw_prediction}")
-    #coref_results = model.extract_molecule_corefs_from_figures([image])
-    coref_results = process_reaction_image_with_multiple_products_and_text_correctmultiR(image_path)
-    for item in coref_results:
-        for bbox in item.get("bboxes", []):
-            for key in ["category", "molfile", "symbols", 'atoms', "bonds", 'category_id', 'score', 'corefs',"coords","edges"]: #'atoms'
-                bbox.pop(key, None)  # 安全地移除键
-
+    coref_results = get_cached_multi_molecular(image_path)
     if not coref_results:
         print("WARNING [Azure]: get_full_reaction_template got empty coref_results, returning empty")
         return {"molecule_coref": []}
-    data = coref_results[0]
-    parsed = parse_coref_data_with_fallback(data)
-
-    combined_result = {
-        #"reaction_prediction": raw_prediction,  # 是个list
-        "molecule_coref": parsed               # 结构化分子识别结果
-    }
+    coref_results = copy.deepcopy(coref_results)
+    for item in coref_results:
+        for bbox in item.get("bboxes", []):
+            for key in ("category", "molfile", "symbols", "atoms", "bonds",
+                        "category_id", "score", "corefs", "coords", "edges"):
+                bbox.pop(key, None)
+    parsed = parse_coref_data_with_fallback(coref_results[0])
+    combined_result = {"molecule_coref": parsed}
     print(f"combined_result:{combined_result}")
     return combined_result
 
@@ -852,44 +772,18 @@ def get_full_reaction_template_OS(image_path: str) -> dict:
     Returns a structured dictionary of reactions extracted from the image,
     including reactants, conditions, and products, with their smiles, text, and bbox.
     '''
-    image = Image.open(image_path).convert('RGB')
-    image_file = image_path
-    with CUDA_MODEL_LOCK:
-        raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
-    ####################raw_prediction = get_reaction_withatoms_correctR(image_path)###############################################################################################
-    for reaction in raw_prediction:
-        for section in ("reactants", "products", "conditions"):
-            for entry in reaction.get(section, []):
-                # 1) 保留 coords 三位小数
-                coords = entry.get("coords")
-                if isinstance(coords, list):
-                    entry["coords"] = [
-                        [round(val, 3) for val in point]
-                        for point in coords
-                    ]
-                # 2) 删除不需要的字段
-                for key in ("molfile", "atoms", "bonds"):
-                    entry.pop(key, None)
-
-    #raw_prediction =json.dumps(raw_prediction)
-    print(f"raw_prediction:{raw_prediction}")
-    #coref_results = model.extract_molecule_corefs_from_figures([image])
-    coref_results = process_reaction_image_with_multiple_products_and_text_correctmultiR_OS(image_path)
-    for item in coref_results:
-        for bbox in item.get("bboxes", []):
-            for key in ["category", "molfile", "symbols", 'atoms', "bonds", 'category_id', 'score', 'corefs',"coords","edges"]: #'atoms'
-                bbox.pop(key, None)  # 安全地移除键
-
+    coref_results = get_cached_multi_molecular_OS(image_path)
     if not coref_results:
         print("WARNING [OS]: get_full_reaction_template_OS got empty coref_results, returning empty")
         return {"molecule_coref": []}
-    data = coref_results[0]
-    parsed = parse_coref_data_with_fallback(data)
-
-    combined_result = {
-        #"reaction_prediction": raw_prediction,  # 是个list
-        "molecule_coref": parsed               # 结构化分子识别结果
-    }
+    coref_results = copy.deepcopy(coref_results)
+    for item in coref_results:
+        for bbox in item.get("bboxes", []):
+            for key in ("category", "molfile", "symbols", "atoms", "bonds",
+                        "category_id", "score", "corefs", "coords", "edges"):
+                bbox.pop(key, None)
+    parsed = parse_coref_data_with_fallback(coref_results[0])
+    combined_result = {"molecule_coref": parsed}
     print(f"combined_result:{combined_result}")
     return combined_result
 
@@ -905,17 +799,8 @@ def process_reaction_image_with_product_variant_R_group(image_path: str) -> dict
     Returns:
         dict: 整理后的反应数据，包括反应物、产物和反应模板。
     """
- 
-    client = AzureOpenAI(
-        api_key=API_KEY,
-        api_version=API_VERSION,
-        azure_endpoint=AZURE_ENDPOINT
-    )
-
-    # 加载图像并编码为 Base64
-    def encode_image(image_path: str):
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode('utf-8')
+    client = get_azure_client()
+    base64_image = encode_image(image_path)
 
     def encode_image_from_array(img_array: np.ndarray) -> str:
         """
@@ -933,7 +818,6 @@ def process_reaction_image_with_product_variant_R_group(image_path: str) -> dict
         
         # 编码为 base64
         return base64.b64encode(img_bytes).decode('utf-8')
-    base64_image = encode_image(image_path)
 
     # GPT 工具调用配置
     tools = [
@@ -976,42 +860,30 @@ def process_reaction_image_with_product_variant_R_group(image_path: str) -> dict
     ]
 
     # 提供给 GPT 的消息内容
-    with open('./prompt/prompt_Str_R.txt', 'r', encoding='utf-8') as prompt_file:
-        prompt = prompt_file.read()
-    messages = [
-        {'role': 'system', 'content': 'You are a helpful assistant.'},
-        {
-            'role': 'user',
-            'content': [
-                {'type': 'text', 'text': prompt},
-                {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{base64_image}'}}
-            ]
-        }
-    ]
+    prompt = read_prompt('./prompt/prompt_Str_R.txt')
 
-    # 调用 GPT 接口
-    response = client.chat.completions.create(
-    model = 'gpt-5-mini',
-    #temperature = 0,
-    response_format={ 'type': 'json_object' },
-    messages = [
-        {'role': 'system', 'content': 'You are a helpful assistant.'},
-        {
-            'role': 'user',
-            'content': [
-                {
-                    'type': 'text',
-                    'text': prompt
-                },
-                {
-                    'type': 'image_url',
-                    'image_url': {
-                        'url': f'data:image/png;base64,{base64_image}'
-                    }
-                }
-            ]},
-    ],
-    tools = tools)
+    # Prefetch both local-model caches in parallel with the first LLM call so
+    # that tool calls return instantly from cache instead of blocking.
+    with ThreadPoolExecutor(max_workers=3) as _pre:
+        _llm_fut  = _pre.submit(
+            client.chat.completions.create,
+            model='gpt-5-mini',
+            response_format={'type': 'json_object'},
+            messages=[
+                {'role': 'system', 'content': 'You are a helpful assistant.'},
+                {'role': 'user', 'content': [
+                    {'type': 'text', 'text': prompt},
+                    {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{base64_image}'}},
+                ]},
+            ],
+            tools=tools,
+        )
+        _mol_fut = _pre.submit(get_cached_multi_molecular, image_path)
+        _rxn_fut = _pre.submit(get_cached_raw_results, image_path)
+        response = _llm_fut.result()
+        # Ensure caches are populated before tool calls below execute
+        _mol_fut.result()
+        _rxn_fut.result()
     
 # Step 1: 工具映射表
     TOOL_MAP = {
@@ -1161,12 +1033,12 @@ def process_reaction_image_with_product_variant_R_group(image_path: str) -> dict
     #p#print.p#print(smiles_details)
 
         # 整理反应数据
-    backed_out = utils.backout_without_coref(reaction_results, coref_results, gpt_output, smiles_details, model.molnextr)
+    backed_out = utils.backout_without_coref(reaction_results, coref_results, gpt_output, smiles_details, _model().molnextr)
     backed_out.sort(key=lambda x: x[2])
     extracted_rxns = {}
     for reactants, products_, label in backed_out:
         extracted_rxns[label] = {'reactants': reactants, 'products': products_}
-    
+
     for item in coref_results:
         for bbox in item.get("bboxes", []):
             for key in ["category", "molfile", "symbols", 'atoms', "bonds", 'category_id', 'score', 'corefs',"coords","edges"]: #'atoms'
@@ -1218,19 +1090,7 @@ def process_reaction_image_with_product_variant_R_group_OS(
     Returns:
         dict: 整理后的反应数据，包括反应物、产物和反应模板。
     """
-    base_url = base_url or os.getenv("VLLM_BASE_URL", os.getenv("OLLAMA_BASE_URL", "http://localhost:8000/v1"))
-    api_key = api_key or os.getenv("VLLM_API_KEY", os.getenv("OLLAMA_API_KEY", "EMPTY"))
-
-    client = OpenAI(
-        base_url=base_url,
-        api_key=api_key,
-    )
-
-    # 加载图像并编码为 Base64
-    def encode_image(image_path: str):
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode('utf-8')
-
+    client = resolve_os_client(base_url=base_url, api_key=api_key)
     base64_image = encode_image(image_path)
 
     # GPT 工具调用配置
@@ -1274,33 +1134,32 @@ def process_reaction_image_with_product_variant_R_group_OS(
     ]
 
     # 提供给 GPT 的消息内容
-    with open('./prompt/prompt_Str_R.txt', 'r', encoding='utf-8') as prompt_file:
-        prompt = prompt_file.read()
-    messages = [
-        {'role': 'system', 'content': 'You are a helpful assistant.'},
-        {
-            'role': 'user',
-            'content': [
-                {'type': 'text', 'text': prompt},
-                {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{base64_image}'}}
-            ]
-        }
-    ]
+    prompt = read_prompt('./prompt/prompt_Str_R.txt')
 
-    # 调用 GPT 接口（带重试机制）
-    response = retry_api_call(
-        client.chat.completions.create,
-        max_retries=5,  # 增加重试次数，因为可能同时有多个请求
-        base_delay=3,   # 增加基础延迟，给 API 更多恢复时间
-        backoff_factor=2,
-        model=model_name,
-        temperature=0,
-        #response_format={'type': 'json_object'},
-        messages=messages,
-        tools=tools,
-        tool_choice="auto",
-    )
-    
+    # Prefetch both local-model caches in parallel with the first LLM call
+    with ThreadPoolExecutor(max_workers=3) as _pre:
+        _llm_fut = _pre.submit(
+            retry_api_call,
+            client.chat.completions.create,
+            5, 3, 2,  # max_retries, base_delay, backoff_factor
+            model=model_name,
+            temperature=0,
+            messages=[
+                {'role': 'system', 'content': 'You are a helpful assistant.'},
+                {'role': 'user', 'content': [
+                    {'type': 'text', 'text': prompt},
+                    {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{base64_image}'}},
+                ]},
+            ],
+            tools=tools,
+            tool_choice="auto",
+        )
+        _mol_fut = _pre.submit(get_cached_multi_molecular_OS, image_path)
+        _rxn_fut = _pre.submit(get_cached_raw_results_OS, image_path)
+        response = _llm_fut.result()
+        _mol_fut.result()
+        _rxn_fut.result()
+
     # Step 1: 工具映射表
     TOOL_MAP = {
         'get_multi_molecular_text_to_correct_OS': get_multi_molecular_text_to_correct_OS,
@@ -1461,12 +1320,12 @@ def process_reaction_image_with_product_variant_R_group_OS(
         products.append(product['smiles'])
 
     # 整理反应数据
-    backed_out = utils.backout_without_coref(reaction_results, coref_results, gpt_output, smiles_details, model.molnextr)
+    backed_out = utils.backout_without_coref(reaction_results, coref_results, gpt_output, smiles_details, _model().molnextr)
     backed_out.sort(key=lambda x: x[2])
     extracted_rxns = {}
     for reactants, products_, label in backed_out:
         extracted_rxns[label] = {'reactants': reactants, 'products': products_}
-    
+
     for item in coref_results:
         for bbox in item.get("bboxes", []):
             for key in ["category", "molfile", "symbols", 'atoms', "bonds", 'category_id', 'score', 'corefs',"coords","edges"]:
@@ -1498,20 +1357,9 @@ def process_reaction_image_with_product_variant_R_group_OS(
 
 def process_reaction_image_with_table_R_group(image_path: str) -> dict:
 
-    client = AzureOpenAI(
-        api_key=API_KEY,
-        api_version=API_VERSION,
-        azure_endpoint=AZURE_ENDPOINT
-    )
-
-    # 加载图像并编码为 Base64
-    def encode_image(image_path: str):
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode('utf-8')
-
+    client = get_azure_client()
     base64_image = encode_image(image_path)
-    with open('./prompt/prompt_Table_R.txt', 'r', encoding='utf-8') as prompt_file:
-        prompt = prompt_file.read()
+    prompt = read_prompt('./prompt/prompt_Table_R.txt')
     tools = [
     {
         'type': 'function',
@@ -1788,22 +1636,9 @@ def process_reaction_image_with_table_R_group_OS(
     Returns:
         dict: 整理后的反应数据，包含 R-group 表格信息。
     """
-    base_url = base_url or os.getenv("VLLM_BASE_URL", os.getenv("OLLAMA_BASE_URL", "http://localhost:8000/v1"))
-    api_key = api_key or os.getenv("VLLM_API_KEY", os.getenv("OLLAMA_API_KEY", "EMPTY"))
-
-    client = OpenAI(
-        base_url=base_url,
-        api_key=api_key,
-    )
-
-    # 加载图像并编码为 Base64
-    def encode_image(image_path: str):
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode('utf-8')
-
+    client = resolve_os_client(base_url=base_url, api_key=api_key)
     base64_image = encode_image(image_path)
-    with open('./prompt/prompt_Table_R.txt', 'r', encoding='utf-8') as prompt_file:
-        prompt = prompt_file.read()
+    prompt = read_prompt('./prompt/prompt_Table_R.txt')
     tools = [
         {
             'type': 'function',

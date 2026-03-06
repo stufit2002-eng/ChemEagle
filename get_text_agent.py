@@ -1,30 +1,45 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
+
+import torch
 from PIL import Image
 import pytesseract
-from chemrxnextractor import RxnExtractor
 from openai import AzureOpenAI, OpenAI
-from typing import Optional
-model_dir = "./cre_models_v0.1"
-rxn_extractor = RxnExtractor(model_dir)
-import json
-import torch
-from chemiener import ChemNER
-from huggingface_hub import hf_hub_download
-ckpt_path = "./ner.ckpt"
-model2 = ChemNER(ckpt_path, device=torch.device('cuda'))
-import base64
-import os
-import shutil
-import re
-import time
-from openai import InternalServerError, RateLimitError, APIError
+
 from _model_lock import CUDA_MODEL_LOCK
+from _shared_models import encode_image, get_azure_client, resolve_os_client, retry_api_call
 
+# ── Lazy singletons for text-extraction models ────────────────────────────────
+_ner_model = None
+_ner_lock = threading.Lock()
 
-API_KEY = os.getenv("API_KEY")
-if not API_KEY:
-    raise ValueError("Please set API_KEY")
-AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
-API_VERSION = os.getenv("API_VERSION")
+def _get_ner_model():
+    global _ner_model
+    if _ner_model is None:
+        with _ner_lock:
+            if _ner_model is None:
+                from chemiener import ChemNER  # noqa: PLC0415
+                _ner_model = ChemNER("./ner.ckpt", device=torch.device("cuda"))
+    return _ner_model
+
+_rxn_extractor = None
+_rxn_extractor_lock = threading.Lock()
+
+def _get_rxn_extractor():
+    global _rxn_extractor
+    if _rxn_extractor is None:
+        with _rxn_extractor_lock:
+            if _rxn_extractor is None:
+                from chemrxnextractor import RxnExtractor  # noqa: PLC0415
+                _rxn_extractor = RxnExtractor("./cre_models_v0.1")
+    return _rxn_extractor
 
 
 def configure_tesseract():
@@ -166,23 +181,7 @@ def split_text_into_sentences(text: str) -> list:
 
 
 def extract_reactions_from_text_in_image(image_path: str) -> dict:
-    """
-    从化学反应图像中提取文本并识别反应。
-
-    参数：
-      image_path: 图像文件路径
-
-    返回：
-      {
-        'raw_text': OCR 提取的完整文本（str),
-        'paragraph': 合并后的段落文本 (str),
-        'reactions': RxnExtractor 输出的反应列表 (list)
-      }
-    """
-    # 模型目录和设备参数（可按需修改）
-    model_dir = "./cre_models_v0.1"
-    device = "cuda"
-
+    """从化学反应图像中提取文本并识别反应（使用单例 RxnExtractor）。"""
     # 1. OCR 提取文本
     img = Image.open(image_path)
     raw_text = pytesseract.image_to_string(img)
@@ -193,50 +192,34 @@ def extract_reactions_from_text_in_image(image_path: str) -> dict:
 
     # 3. 将文本分割成句子，避免长度问题
     sentences = split_text_into_sentences(paragraph)
-    
-    # 4. 初始化化学反应提取器
-    use_cuda = (device.lower() == "cuda")
-    rxn_extractor = RxnExtractor(model_dir, use_cuda=use_cuda)
+
+    # 4. 使用单例 RxnExtractor（避免每次调用都重新加载模型）
+    rxn_extractor = _get_rxn_extractor()
 
     # 5. 对每个句子提取反应（避免长度不匹配问题）
     all_reactions = []
     try:
-        reactions = rxn_extractor.get_reactions(sentences)
-        all_reactions = reactions
+        all_reactions = rxn_extractor.get_reactions(sentences)
     except AssertionError as e:
-        # 如果还是出错，尝试逐个句子处理
         print(f"警告: 批量处理失败，尝试逐个句子处理: {e}")
-        all_reactions = []
         for sent in sentences:
             try:
-                sent_reactions = rxn_extractor.get_reactions([sent])
-                all_reactions.extend(sent_reactions)
+                all_reactions.extend(rxn_extractor.get_reactions([sent]))
             except Exception as sent_e:
                 print(f"警告: 跳过句子（处理失败）: {sent[:50]}... 错误: {sent_e}")
-                continue
 
-    return all_reactions 
+    return all_reactions
 
 def NER_from_text_in_image(image_path: str) -> dict:
-    # 模型目录和设备参数（可按需修改）
-    model_dir = "./cre_models_v0.1"
-    device = "cuda"
-
-    # 1. OCR 提取文本
+    """OCR + chemical NER using singleton ChemNER model."""
     img = Image.open(image_path)
     raw_text = pytesseract.image_to_string(img)
 
-    # 2. 将多行文本合并为单段落
     lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
     paragraph = " ".join(lines)
 
-    # 3. 初始化化学反应提取器
-    use_cuda = (device.lower() == "cuda")
-    rxn_extractor = RxnExtractor(model_dir, use_cuda=use_cuda)
-
-    # 4. 提取反应（注意 get_reactions 需要列表输入）
     with CUDA_MODEL_LOCK:
-        predictions = model2.predict_strings([paragraph])
+        predictions = _get_ner_model().predict_strings([paragraph])
 
     return predictions
 
@@ -250,16 +233,11 @@ def text_extraction_agent(image_path: str) -> dict:
       2) NER_from_text_in_image
     to perform OCR, reaction extraction, and chemical NER on a single image.
     Returns a merged JSON result.
-    """
-    client = AzureOpenAI(
-        api_key=API_KEY,
-        api_version=API_VERSION,
-        azure_endpoint=AZURE_ENDPOINT
-    )
 
-    # Encode image as Base64
-    with open(image_path, "rb") as f:
-        b64_image = base64.b64encode(f.read()).decode("utf-8")
+    The two local tools are now executed in parallel when the LLM requests them.
+    """
+    client = get_azure_client()
+    b64_image = encode_image(image_path)
 
     # Define tools for the agent
     tools = [
@@ -386,30 +364,33 @@ Here is my step-by-step analysis:
                 result = None
             return result if result is not None else {"content": raw_content1}
     
+    # Execute all tool calls in parallel (extract_reactions and NER are independent)
+    _TOOL_FN = {
+        "extract_reactions_from_text_in_image": extract_reactions_from_text_in_image,
+        "NER_from_text_in_image": NER_from_text_in_image,
+    }
+
+    def _run_tool(call):
+        fn = _TOOL_FN.get(call.function.name)
+        if fn is None:
+            return None
+        return call, fn(image_path)
+
     tool_results_msgs = []
-    for call in tool_calls:
-        name = call.function.name
-        tool_call_id = call.id
-        
-        if name == "extract_reactions_from_text_in_image":
-            result = extract_reactions_from_text_in_image(image_path)
-        elif name == "NER_from_text_in_image":
-            result = NER_from_text_in_image(image_path)
-        else:
-            continue
-        
-        # Correct format for tool messages: need tool_call_id, not tool_name
-        tool_results_msgs.append({
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "content": json.dumps(result, ensure_ascii=False)
-        })
+    with ThreadPoolExecutor(max_workers=len(tool_calls)) as _ex:
+        for call, result in _ex.map(_run_tool, tool_calls):
+            if result is None:
+                continue
+            tool_results_msgs.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": json.dumps(result, ensure_ascii=False),
+            })
 
     # Second API call: pass tool outputs back to GPT for final response
-    # Add assistant message and tool results to messages
     messages.append(assistant_message)
     messages.extend(tool_results_msgs)
-    
+
     response2 = client.chat.completions.create(
         model="gpt-5-mini",
         messages=messages,
@@ -438,56 +419,6 @@ Here is my step-by-step analysis:
         return result if result is not None else {"content": raw2}
 
 
-def retry_api_call(func, max_retries=3, base_delay=2, backoff_factor=2, *args, **kwargs):
-    """
-    通用的 API 调用重试函数，支持指数退避策略。
-    
-    Args:
-        func: 要调用的函数
-        max_retries: 最大重试次数
-        base_delay: 基础延迟时间（秒）
-        backoff_factor: 退避因子（每次重试延迟时间 = base_delay * backoff_factor^attempt）
-        *args, **kwargs: 传递给 func 的参数
-    
-    Returns:
-        func 的返回值
-    
-    Raises:
-        最后一次尝试的异常
-    """
-    last_exception = None
-    
-    for attempt in range(max_retries):
-        try:
-            return func(*args, **kwargs)
-        except (InternalServerError, RateLimitError, APIError) as e:
-            last_exception = e
-            error_code = getattr(e, 'status_code', None) or getattr(e, 'code', None)
-            error_message = str(e)
-            
-            # 检查是否是 503 错误或其他可重试的错误
-            if error_code == 503 or 'overloaded' in error_message.lower() or '503' in error_message:
-                if attempt < max_retries - 1:
-                    delay = base_delay * (backoff_factor ** attempt)
-                    print(f"⚠️ API 调用失败 (503/过载)，第 {attempt + 1}/{max_retries} 次尝试。{delay:.1f} 秒后重试...")
-                    time.sleep(delay)
-                    continue
-                else:
-                    print(f"❌ API 调用失败，已达到最大重试次数 ({max_retries})")
-                    raise
-            else:
-                # 其他类型的错误，直接抛出
-                raise
-        except Exception as e:
-            # 其他未知错误，直接抛出
-            raise
-    
-    # 如果所有重试都失败了
-    if last_exception:
-        raise last_exception
-    raise RuntimeError("API 调用失败，未知错误")
-
-
 def text_extraction_agent_OS(
     image_path: str,
     *,
@@ -495,17 +426,8 @@ def text_extraction_agent_OS(
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> dict:
-    base_url = base_url or os.getenv("VLLM_BASE_URL", os.getenv("OLLAMA_BASE_URL", "http://localhost:8000/v1"))
-    api_key = api_key or os.getenv("VLLM_API_KEY", os.getenv("OLLAMA_API_KEY", "EMPTY"))
-
-    client = OpenAI(
-        base_url=base_url,
-        api_key=api_key,
-    )
-
-    # Encode image as Base64
-    with open(image_path, "rb") as f:
-        b64_image = base64.b64encode(f.read()).decode("utf-8")
+    client = resolve_os_client(base_url=base_url, api_key=api_key)
+    b64_image = encode_image(image_path)
 
     # Define tools for the agent
     tools = [
@@ -651,40 +573,41 @@ Here is my step-by-step analysis:
                 return {"content": raw_content}
         return {}
     
+    # Execute all tool calls in parallel
+    _TOOL_FN = {
+        "extract_reactions_from_text_in_image": extract_reactions_from_text_in_image,
+        "NER_from_text_in_image": NER_from_text_in_image,
+    }
+
+    def _run_tool_os(call):
+        fn = _TOOL_FN.get(call.function.name)
+        if fn is None:
+            return None
+        return call, fn(image_path)
+
     tool_results_msgs = []
-    for call in tool_calls:
-        name = call.function.name
-        tool_call_id = call.id
-        
-        if name == "extract_reactions_from_text_in_image":
-            result = extract_reactions_from_text_in_image(image_path)
-        elif name == "NER_from_text_in_image":
-            result = NER_from_text_in_image(image_path)
-        else:
-            continue
-        
-        # Correct format for tool messages: need tool_call_id and name (for some APIs)
-        tool_results_msgs.append({
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "name": name,  # Some APIs (like Gemini) require name field
-            "content": json.dumps(result, ensure_ascii=False)
-        })
+    with ThreadPoolExecutor(max_workers=len(tool_calls)) as _ex:
+        for item in _ex.map(_run_tool_os, tool_calls):
+            if item is None:
+                continue
+            call, result = item
+            tool_results_msgs.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "name": call.function.name,
+                "content": json.dumps(result, ensure_ascii=False),
+            })
 
     # Second API call: pass tool outputs back to GPT for final response
-    # Add assistant message and tool results to messages
     messages.append(assistant_message)
     messages.extend(tool_results_msgs)
-    
+
     response2 = retry_api_call(
         client.chat.completions.create,
-        max_retries=5,
-        base_delay=3,
-        backoff_factor=2,
+        5, 3, 2,
         model=model_name,
         messages=messages,
         temperature=0,
-        # response_format={"type": "json_object"},  # vLLM 可能不支持
     )
 
     # Parse response (support extracting JSON from text with reasoning)

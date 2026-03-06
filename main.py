@@ -1,43 +1,21 @@
-import sys
-import torch
-import json
-from chemietoolkit import ChemIEToolkit,utils
-import cv2
-from openai import AzureOpenAI, OpenAI
-import numpy as np
-from PIL import Image
 import json
 import os
-import sys
-from rxnim import RxnIM
-import json
-import base64
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
+
+from openai import AzureOpenAI, OpenAI
+
 from get_molecular_agent import process_reaction_image_with_multiple_products_and_text_correctR, process_reaction_image_with_multiple_products_and_text_correctmultiR
 from get_reaction_agent import get_reaction_withatoms_correctR
-from get_R_group_sub_agent import process_reaction_image_with_table_R_group, process_reaction_image_with_product_variant_R_group,get_full_reaction_template_OS,get_full_reaction_template, get_multi_molecular_full, process_reaction_image_with_table_R_group_OS,process_reaction_image_with_product_variant_R_group_OS,get_full_reaction_OS,get_reaction_OS
-from get_observer import action_observer_agent, plan_observer_agent,action_observer_agent_OS, plan_observer_agent_OS
+from get_R_group_sub_agent import process_reaction_image_with_table_R_group, process_reaction_image_with_product_variant_R_group, get_full_reaction_template_OS, get_full_reaction_template, get_multi_molecular_full, process_reaction_image_with_table_R_group_OS, process_reaction_image_with_product_variant_R_group_OS, get_full_reaction_OS, get_reaction_OS
+from get_observer import action_observer_agent, plan_observer_agent, action_observer_agent_OS, plan_observer_agent_OS
 from get_text_agent import text_extraction_agent, text_extraction_agent_OS
+from _shared_models import encode_image, get_azure_client, read_prompt, resolve_os_client
 
-
-# ── CUDA-only device ─────────────────────────────────────────────────────────
-if not torch.cuda.is_available():
-    raise RuntimeError("CUDA GPU is required but not available. "
-                       "Ensure CUDA drivers and a CUDA-capable GPU are present.")
-torch.backends.cudnn.benchmark = True   # auto-tune conv kernels (speed boost)
-
-_DEVICE = torch.device('cuda')
-model = ChemIEToolkit(device=_DEVICE)
-ckpt_path = "./rxn.ckpt"
-model1 = RxnIM(ckpt_path, device=_DEVICE)
-device = _DEVICE
-
-API_KEY = os.getenv("API_KEY")
-if not API_KEY:
+# Validate required env vars at import time (same behaviour as before)
+if not os.getenv("API_KEY"):
     raise ValueError("Please set API_KEY")
-AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
-API_VERSION = os.getenv("API_VERSION")
 
 # Maps observer-returned agent names (display names / snake_case variants)
 # back to the real function names registered in TOOL_MAP.
@@ -152,18 +130,7 @@ def ChemEagle(
 ) -> dict:
     """
     """
-    # 初始化 Azure OpenAI 客户端
-    client = AzureOpenAI(
-        api_key=API_KEY,
-        api_version=API_VERSION,
-        azure_endpoint=AZURE_ENDPOINT
-    )
-
-    # 加载图像并编码为 Base64
-    def encode_image(image_path: str):
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode('utf-8')
-
+    client = get_azure_client()
     base64_image = encode_image(image_path)
 
     # GPT 工具调用配置
@@ -260,12 +227,9 @@ def ChemEagle(
         },
     ]
 
-    # 提供给 GPT 的消息内容
-    with open('./prompt/prompt_final_simple_version.txt', 'r', encoding='utf-8') as prompt_file:
-        prompt = prompt_file.read()
-
-    with open('./prompt/prompt_plan_new.txt', 'r', encoding='utf-8') as prompt_file:
-        planner_user_message = prompt_file.read()
+    # 提供给 GPT 的消息内容 (cached — no disk I/O after first call)
+    prompt = read_prompt('./prompt/prompt_final_simple_version.txt')
+    planner_user_message = read_prompt('./prompt/prompt_plan_new.txt')
 
     # Step 1: 调用 planner 获取 agent 列表
     planner_response = client.chat.completions.create(
@@ -412,17 +376,6 @@ def ChemEagle(
             'tool_call_id': tool_call_id,
         })
 
-    # Action Observer: 检查执行结果（非阻塞）
-    # The observer's opinion is logged but the pipeline always proceeds to
-    # final compilation — returning early on redo=True would skip synthesis.
-    if use_action_observer:
-        try:
-            redo_suggested = action_observer_agent(image_path, execution_logs)
-            if redo_suggested:
-                print("[Azure] WARNING: action_observer suggested redo=True, but proceeding to final compilation anyway.")
-        except Exception as obs_err:
-            print(f"[Azure] WARNING: action_observer failed ({obs_err}), proceeding anyway.")
-
     # Serialize tool results as plain text to avoid malformed tool-message conversation
     # structure (tool messages require a preceding assistant message with tool_calls).
     # Also avoids response_format=json_object which can implicitly force temperature=0,
@@ -443,11 +396,28 @@ def ChemEagle(
         }
     ]
 
-    # Generate new response (no response_format to avoid implicit temperature=0)
-    response = client.chat.completions.create(
-        model='gpt-5-mini',
-        messages=final_messages,
-    )
+    # Action Observer and final synthesis run in parallel — the observer's
+    # opinion is logged but never blocks synthesis (redo is never acted on).
+    def _run_observer():
+        if not use_action_observer:
+            return False
+        try:
+            return action_observer_agent(image_path, execution_logs)
+        except Exception as obs_err:
+            print(f"[Azure] WARNING: action_observer failed ({obs_err}), proceeding anyway.")
+            return False
+
+    def _run_synthesis():
+        return client.chat.completions.create(model='gpt-5-mini', messages=final_messages)
+
+    with ThreadPoolExecutor(max_workers=2) as _ex:
+        _obs_future   = _ex.submit(_run_observer)
+        _synth_future = _ex.submit(_run_synthesis)
+        redo_suggested = _obs_future.result()
+        response       = _synth_future.result()
+
+    if redo_suggested:
+        print("[Azure] WARNING: action_observer suggested redo=True, but proceeding to final compilation anyway.")
 
     # Parse JSON from response (with fallback for reasoning-model text wrapping)
     from get_R_group_sub_agent import extract_json_from_text_with_reasoning
@@ -488,26 +458,12 @@ def ChemEagle_OS(
     """
     Open source version of ChemEagle
     """
-    base_url = base_url or os.getenv("VLLM_BASE_URL", os.getenv("OLLAMA_BASE_URL", "http://localhost:8000/v1"))
-    api_key = api_key or os.getenv("VLLM_API_KEY", os.getenv("OLLAMA_API_KEY", "EMPTY"))
-
-    client = OpenAI(
-        base_url=base_url,
-        api_key=api_key,
-    )
-
-    def encode_image(path: str) -> str:
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
-
+    client = resolve_os_client(base_url=base_url, api_key=api_key)
     base64_image = encode_image(image_path)
 
-    # 提供给 GPT 的消息内容
-    with open('./prompt/prompt_final_simple_version.txt', 'r', encoding='utf-8') as prompt_file:
-        prompt = prompt_file.read()
-
-    with open('./prompt/prompt_plan_new.txt', 'r', encoding='utf-8') as prompt_file:
-        planner_user_message = prompt_file.read()
+    # 提供给 GPT 的消息内容 (cached — no disk I/O after first call)
+    prompt = read_prompt('./prompt/prompt_final_simple_version.txt')
+    planner_user_message = read_prompt('./prompt/prompt_plan_new.txt')
 
     # Step 1: 调用 planner 获取 agent 列表
     planner_response = client.chat.completions.create(
@@ -660,19 +616,7 @@ def ChemEagle_OS(
     
     print(f'[OS_D] results: {results}')
     
-    # Action Observer: 检查执行结果（非阻塞）
-    # The observer's opinion is logged but the pipeline always proceeds to
-    # final compilation — returning early on redo=True would skip synthesis.
-    if use_action_observer:
-        try:
-            redo_suggested = action_observer_agent_OS(image_path, execution_logs)
-            if redo_suggested:
-                print("[OS] WARNING: action_observer suggested redo=True, but proceeding to final compilation anyway.")
-        except Exception as obs_err:
-            print(f"[OS] WARNING: action_observer failed ({obs_err}), proceeding anyway.")
-
-    # Prepare the chat completion payload
-    # 构建 assistant 消息，包含 planner 的输出和工具调用信息
+    # Prepare the final synthesis payload
     executed_tools = [selected_tool]
     if has_text_extraction:
         executed_tools.append("text_extraction_agent")
@@ -680,29 +624,45 @@ def ChemEagle_OS(
         "role": "assistant",
         "content": f"Selected agents: {', '.join(agent_list)}\nExecuted tools: {', '.join(executed_tools)}"
     }
-    
-    completion_payload = {
-        'model': model_name,
-        'messages': [
-            {'role': 'system', 'content': 'You are a helpful assistant.'},
-            {
-                'role': 'user',
-                'content': [
-                    {'type': 'text', 'text': prompt},
-                    {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{base64_image}' }}
-                ],
-            },
-            assistant_message,
-            *results
-            ],
-    }
 
-    response = client.chat.completions.create(
-        model=completion_payload["model"],
-        messages=completion_payload["messages"],
-        #response_format={ 'type': 'json_object' },
-        temperature=0,
-    )
+    final_messages_os = [
+        {'role': 'system', 'content': 'You are a helpful assistant.'},
+        {
+            'role': 'user',
+            'content': [
+                {'type': 'text', 'text': prompt},
+                {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{base64_image}'}}
+            ],
+        },
+        assistant_message,
+        *results,
+    ]
+
+    # Action Observer and final synthesis run in parallel
+    def _run_observer_os():
+        if not use_action_observer:
+            return False
+        try:
+            return action_observer_agent_OS(image_path, execution_logs)
+        except Exception as obs_err:
+            print(f"[OS] WARNING: action_observer failed ({obs_err}), proceeding anyway.")
+            return False
+
+    def _run_synthesis_os():
+        return client.chat.completions.create(
+            model=model_name,
+            messages=final_messages_os,
+            temperature=0,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as _ex:
+        _obs_future   = _ex.submit(_run_observer_os)
+        _synth_future = _ex.submit(_run_synthesis_os)
+        redo_suggested = _obs_future.result()
+        response       = _synth_future.result()
+
+    if redo_suggested:
+        print("[OS] WARNING: action_observer suggested redo=True, but proceeding to final compilation anyway.")
     print(response)
     
     # 获取原始响应内容

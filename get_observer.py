@@ -1,35 +1,18 @@
-import base64
 import json
 import os
-import time
 from typing import Any, List, Optional
 
 from openai import AzureOpenAI, OpenAI
-from openai import InternalServerError, RateLimitError, APIError
 
+from _shared_models import encode_image as _encode_image_shared, get_azure_client, resolve_os_client, retry_api_call
 
-API_KEY = os.getenv("API_KEY")
-AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
-API_VERSION = os.getenv("API_VERSION")
-
-_client = None
 
 def _get_client():
-    global _client
-    if _client is None:
-        api_key = API_KEY or os.getenv("AZURE_OPENAI_API_KEY")
-        azure_endpoint = AZURE_ENDPOINT or os.getenv("AZURE_OPENAI_ENDPOINT")
-        api_version = API_VERSION or "2024-06-01"
-        
-        if not api_key or not azure_endpoint:
-            return None
-        
-        _client = AzureOpenAI(
-            api_key=api_key,
-            api_version=api_version,
-            azure_endpoint=azure_endpoint,
-        )
-    return _client
+    """Return the shared Azure client (or None if env vars are not set)."""
+    try:
+        return get_azure_client()
+    except ValueError:
+        return None
 
 PLAN_PROMPT_TEMPLATE = """System Message:
 You are a plan observer. Given the graphic and the current list of agent calls (plan), decide whether the plan is sufficient.
@@ -101,8 +84,7 @@ Current agent_result (JSON):
 def _encode_image(image_path: str) -> str | None:
     if not image_path or not os.path.exists(image_path):
         return None
-    with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode("utf-8")
+    return _encode_image_shared(image_path)
 
 
 def plan_observer_agent(image_path: str, tool_calls: List[Any]) -> List[Any]:
@@ -190,56 +172,6 @@ def action_observer_agent(image_path: str, tool_result: Any) -> bool:
         return False
 
 
-def retry_api_call(func, max_retries=3, base_delay=2, backoff_factor=2, *args, **kwargs):
-    """
-    通用的 API 调用重试函数，支持指数退避策略。
-    
-    Args:
-        func: 要调用的函数
-        max_retries: 最大重试次数
-        base_delay: 基础延迟时间（秒）
-        backoff_factor: 退避因子（每次重试延迟时间 = base_delay * backoff_factor^attempt）
-        *args, **kwargs: 传递给 func 的参数
-    
-    Returns:
-        func 的返回值
-    
-    Raises:
-        最后一次尝试的异常
-    """
-    last_exception = None
-    
-    for attempt in range(max_retries):
-        try:
-            return func(*args, **kwargs)
-        except (InternalServerError, RateLimitError, APIError) as e:
-            last_exception = e
-            error_code = getattr(e, 'status_code', None) or getattr(e, 'code', None)
-            error_message = str(e)
-            
-            # 检查是否是 503 错误或其他可重试的错误
-            if error_code == 503 or 'overloaded' in error_message.lower() or '503' in error_message:
-                if attempt < max_retries - 1:
-                    delay = base_delay * (backoff_factor ** attempt)
-                    print(f"⚠️ API 调用失败 (503/过载)，第 {attempt + 1}/{max_retries} 次尝试。{delay:.1f} 秒后重试...")
-                    time.sleep(delay)
-                    continue
-                else:
-                    print(f"❌ API 调用失败，已达到最大重试次数 ({max_retries})")
-                    raise
-            else:
-                # 其他类型的错误，直接抛出
-                raise
-        except Exception as e:
-            # 其他未知错误，直接抛出
-            raise
-    
-    # 如果所有重试都失败了
-    if last_exception:
-        raise last_exception
-    raise RuntimeError("API 调用失败，未知错误")
-
-
 def plan_observer_agent_OS(
     image_path: str,
     tool_calls: List[Any],
@@ -248,26 +180,8 @@ def plan_observer_agent_OS(
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> List[Any]:
-    """
-    OS 版本的 plan_observer_agent，使用兼容 OpenAI Chat Completions 协议的本地/自建模型。
-
-    Args:
-        image_path: 图像文件路径
-        tool_calls: 当前工具调用计划列表
-        model_name: 本地模型名称（默认 `/models/Qwen3-VL-32B-Instruct-AWQ`）
-        base_url: OpenAI 兼容接口地址，若为 None 则使用环境变量或默认值 `http://localhost:8000/v1`
-        api_key: 接口密钥，可为任意非空字符串（vLLM 默认可填 `"EMPTY"`）
-
-    Returns:
-        List[Any]: 审查后的工具调用计划列表
-    """
-    base_url = base_url or os.getenv("VLLM_BASE_URL", os.getenv("OLLAMA_BASE_URL", "http://localhost:8000/v1"))
-    api_key = api_key or os.getenv("VLLM_API_KEY", os.getenv("OLLAMA_API_KEY", "EMPTY"))
-
-    client_os = OpenAI(
-        base_url=base_url,
-        api_key=api_key,
-    )
+    """OS version of plan_observer_agent using a cached vLLM/Ollama client."""
+    client_os = resolve_os_client(base_url=base_url, api_key=api_key)
 
     base64_image = _encode_image(image_path)
     plan_json = json.dumps(tool_calls or [], ensure_ascii=False, indent=2)
@@ -330,26 +244,8 @@ def action_observer_agent_OS(
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> bool:
-    """
-    OS 版本的 action_observer_agent，使用兼容 OpenAI Chat Completions 协议的本地/自建模型。
-
-    Args:
-        image_path: 图像文件路径
-        tool_result: 工具执行结果
-        model_name: 本地模型名称（默认 `/models/Qwen3-VL-32B-Instruct-AWQ`）
-        base_url: OpenAI 兼容接口地址，若为 None 则使用环境变量或默认值 `http://localhost:8000/v1`
-        api_key: 接口密钥，可为任意非空字符串（vLLM 默认可填 `"EMPTY"`）
-
-    Returns:
-        bool: 是否需要重新执行（True 表示需要重做）
-    """
-    base_url = base_url or os.getenv("VLLM_BASE_URL", os.getenv("OLLAMA_BASE_URL", "http://localhost:8000/v1"))
-    api_key = api_key or os.getenv("VLLM_API_KEY", os.getenv("OLLAMA_API_KEY", "EMPTY"))
-
-    client_os = OpenAI(
-        base_url=base_url,
-        api_key=api_key,
-    )
+    """OS version of action_observer_agent using a cached vLLM/Ollama client."""
+    client_os = resolve_os_client(base_url=base_url, api_key=api_key)
 
     base64_image = _encode_image(image_path)
     result_json = json.dumps(tool_result, ensure_ascii=False, indent=2)

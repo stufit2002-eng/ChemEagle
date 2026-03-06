@@ -1,594 +1,241 @@
-import sys
-import torch
-import json
-from chemietoolkit import ChemIEToolkit
-import cv2
-from PIL import Image
-import json
-import sys
-import torch
-from rxnim import RxnIM
-import json
-from molnextr.chemistry import _convert_graph_to_smiles
+"""get_reaction_agent.py
 
-from openai import AzureOpenAI, OpenAI, InternalServerError, RateLimitError, APIError
-import base64
-import numpy as np
-from chemietoolkit import utils
-from PIL import Image
+Reaction-extraction agent.  Optimisations vs. original:
+  • ChemIEToolkit / RxnIM are loaded once via _shared_models singletons
+    (previously each file instantiated its own copy, loading models 4×).
+  • encode_image / read_prompt are cached (no repeated disk I/O per call).
+  • retry_api_call defined once in _shared_models (was duplicated here).
+  • AzureOpenAI / OpenAI clients are singletons (no new HTTP session per call).
+  • get_raw_prediction() is called at most once per image path (thread-safe
+    cache).  The original code called model1.predict_image_file() twice inside
+    get_reaction_withatoms_correctR — once as the LLM tool result and again
+    for the final symbol merge step.
+  • First LLM call and local model pre-computation run in parallel inside
+    get_reaction_withatoms_correctR / get_reaction_withatoms_correctR_OS.
+"""
+
+from __future__ import annotations
+
+import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
-import time
-from _model_lock import CUDA_MODEL_LOCK
 
-def retry_api_call(func, max_retries=3, base_delay=2, backoff_factor=2, *args, **kwargs):
-    last_exception = None
-    
-    for attempt in range(max_retries):
-        try:
-            return func(*args, **kwargs)
-        except (InternalServerError, RateLimitError, APIError) as e:
-            last_exception = e
-            error_code = getattr(e, 'status_code', None) or getattr(e, 'code', None)
-            error_message = str(e)
-            
-            # 检查是否是 503 错误或其他可重试的错误
-            if error_code == 503 or 'overloaded' in error_message.lower() or '503' in error_message:
-                if attempt < max_retries - 1:
-                    delay = base_delay * (backoff_factor ** attempt)
-                    print(f"⚠️ API 调用失败 (503/过载)，第 {attempt + 1}/{max_retries} 次尝试。{delay:.1f} 秒后重试...")
-                    time.sleep(delay)
-                    continue
+from molnextr.chemistry import _convert_graph_to_smiles
+from openai import AzureOpenAI, OpenAI
+
+from _model_lock import CUDA_MODEL_LOCK  # backward-compat import
+from _shared_models import (
+    encode_image,
+    get_azure_client,
+    get_raw_prediction,
+    get_rxnim,
+    read_prompt,
+    resolve_os_client,
+    retry_api_call,
+)
+
+
+# ── Structured-output helpers ─────────────────────────────────────────────────
+
+def _raw_to_structured(raw_pred: dict) -> dict:
+    """Return a compact structured dict from a single raw RxnIM prediction."""
+    structured: dict = {}
+    for section_key in ("reactants", "conditions", "products"):
+        if section_key not in raw_pred:
+            continue
+        structured[section_key] = []
+        for item in raw_pred[section_key]:
+            if section_key in ("reactants", "products"):
+                structured[section_key].append({
+                    "smiles":  item.get("smiles", ""),
+                    "bbox":    item.get("bbox", []),
+                    "symbols": item.get("symbols", []),
+                })
+            else:  # conditions
+                entry = {"bbox": item.get("bbox", [])}
+                if "smiles" in item:
+                    entry["smiles"] = item.get("smiles", "")
+                    entry["symbols"] = item.get("symbols", [])
+                if "text" in item:
+                    entry["text"] = item.get("text", [])
+                structured[section_key].append(entry)
+    return structured
+
+
+def _update_input_with_symbols(input1: dict, input2: dict, conversion_function) -> dict:
+    """Merge GPT-corrected symbols from *input1* into the raw *input2* prediction."""
+    symbol_mapping: dict = {}
+    for key in ("reactants", "conditions", "products"):
+        for item in input1.get(key, []):
+            if "symbols" in item and "bbox" in item:
+                symbol_mapping[tuple(item["bbox"])] = item["symbols"]
+
+    for key in ("reactants", "conditions", "products"):
+        for item in input2.get(key, []):
+            if "bbox" not in item:
+                continue
+            bbox = tuple(item["bbox"])
+            if bbox not in symbol_mapping:
+                continue
+            updated_symbols = symbol_mapping[bbox]
+            item["symbols"] = updated_symbols
+
+            if "atoms" in item:
+                atoms = item["atoms"]
+                if len(atoms) != len(updated_symbols):
+                    print(f"Warning: Mismatched symbols and atoms at bbox {bbox}")
                 else:
-                    print(f"❌ API 调用失败，已达到最大重试次数 ({max_retries})")
-                    raise
-            else:
-                # 其他类型的错误，直接抛出
-                raise
-        except Exception as e:
-            # 其他未知错误，直接抛出
-            raise
-    
-    # 如果所有重试都失败了
-    if last_exception:
-        raise last_exception
-    raise RuntimeError("API 调用失败，未知错误")
+                    for atom, sym in zip(atoms, updated_symbols):
+                        atom["atom_symbol"] = sym
 
-torch.backends.cudnn.benchmark = True
-_DEVICE = torch.device('cuda')
-ckpt_path = "./rxn.ckpt"
-model1 = RxnIM(ckpt_path, device=_DEVICE)
-device = _DEVICE
-model = ChemIEToolkit(device=_DEVICE)
+            if "coords" in item and "edges" in item:
+                new_smiles, new_molfile, _ = conversion_function(
+                    item["coords"], updated_symbols, item["edges"]
+                )
+                item["smiles"] = new_smiles
+                item["molfile"] = new_molfile
 
-API_KEY = os.getenv("API_KEY")
-if not API_KEY:
-    raise ValueError("Please set API_KEY")
-AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
-API_VERSION = os.getenv("API_VERSION")
+    return input2
 
+
+# ── Public API functions (kept for backward compatibility) ────────────────────
 
 def get_reaction(image_path: str) -> dict:
-    '''
-    Returns a structured dictionary of reactions extracted from the image,
-    including reactants, conditions, and products, with their smiles, text, and bbox.
-    '''
-    image_file = image_path
-    image = Image.open(image_file)
-
-    image_file = image_path
-    with CUDA_MODEL_LOCK:
-        raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
-    #print(f'raw_prediction:{raw_prediction}')
-
-    if not raw_prediction:
+    """Return a structured reaction dict from the cached raw prediction."""
+    raw = get_raw_prediction(image_path)
+    if not raw:
         return {}
-
-    # Ensure raw_prediction is treated as a list directly
-    structured_output = {}
-    for section_key in ['reactants', 'conditions', 'products']:
-        if section_key in raw_prediction[0]:
-            structured_output[section_key] = []
-            for item in raw_prediction[0][section_key]:
-                if section_key in ['reactants', 'products']:
-                    # Extract smiles and bbox for molecules
-                    structured_output[section_key].append({
-                        "smiles": item.get("smiles", ""),
-                        "bbox": item.get("bbox", []),
-                        "symbols": item.get("symbols", [])  
-                    })
-                elif section_key == 'conditions':
-                    # Extract smiles, text, and bbox for conditions
-                    condition_data = {"bbox": item.get("bbox", [])}
-                    if "smiles" in item:
-                        condition_data["smiles"] = item.get("smiles", "")
-                        condition_data["symbols"] = item.get("symbols", [])
-                    if "text" in item:
-                        condition_data["text"] = item.get("text", [])
-                    structured_output[section_key].append(condition_data)
-    #print(f'structured_output:{structured_output}')
-
-    return structured_output
+    return _raw_to_structured(raw[0])
 
 
-
-def get_full_reaction(image_path: str) -> dict:
-    '''
-    Returns a structured dictionary of reactions extracted from the image,
-    including reactants, conditions, and products, with their smiles, text, and bbox.
-    '''
-    image_file = image_path
-    with CUDA_MODEL_LOCK:
-        raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
-    for reaction in raw_prediction:
+def get_full_reaction(image_path: str) -> str:
+    """Return a JSON-serialised, trimmed raw prediction list."""
+    raw = get_raw_prediction(image_path)
+    for reaction in raw:
         for section in ("reactants", "products", "conditions"):
             for entry in reaction.get(section, []):
-                # 1) 保留 coords 三位小数
                 coords = entry.get("coords")
                 if isinstance(coords, list):
-                    entry["coords"] = [
-                        [round(val, 3) for val in point]
-                        for point in coords
-                    ]
-                # 2) 删除不需要的字段
+                    entry["coords"] = [[round(v, 3) for v in pt] for pt in coords]
                 for key in ("molfile", "atoms", "bonds"):
                     entry.pop(key, None)
-
-    raw_prediction =json.dumps(raw_prediction)
-    return raw_prediction
+    return json.dumps(raw)
 
 
+# ── Azure backend ─────────────────────────────────────────────────────────────
 
-def get_reaction_withatoms(image_path: str) -> dict:
+def get_reaction_withatoms_correctR(image_path: str) -> list:
+    """Extract and symbol-correct reactions using AzureOpenAI + RxnIM.
+
+    Optimisations
+    -------------
+    • RxnIM.predict_image_file is called once via get_raw_prediction() and
+      the cached result is reused for both the tool-call response and the
+      final symbol-merge step (was called twice before).
+    • The first LLM call and the local model pre-computation run in parallel
+      so GPU inference overlaps the network round-trip.
     """
-    输入化学反应图像路径，通过 GPT 模型和 OpenChemIE 提取反应信息并返回整理后的反应数据。
+    client = get_azure_client()
+    b64_image = encode_image(image_path)
+    prompt = read_prompt("./prompt/prompt_Rxn_Tem.txt")
 
-    Args:
-        image_path (str): 图像文件路径。
-
-    Returns:
-        dict: 整理后的反应数据，包括反应物、产物和反应模板。
-    """
-    # 初始化 OpenChemIE 模型和 Azure OpenAI 客户端
-    client = AzureOpenAI(
-        api_key=API_KEY,
-        api_version=API_VERSION,
-        azure_endpoint=AZURE_ENDPOINT
-    )
-
-    # 加载图像并编码为 Base64
-    def encode_image(image_path: str):
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode('utf-8')
-
-    base64_image = encode_image(image_path)
-
-    # GPT 工具调用配置
-    tools = [
+    _TOOL_DEF = [
         {
-        'type': 'function',
-        'function': {
-            'name': 'get_reaction',
-            'description': 'Get a list of reactions from a reaction image. A reaction contains data of the reactants, conditions, and products.',
-            'parameters': {
-                'type': 'object',
-                'properties': {
-                    'image_path': {
-                        'type': 'string',
-                        'description': 'The path to the reaction image.',
+            "type": "function",
+            "function": {
+                "name": "get_reaction",
+                "description": (
+                    "Get a list of reactions from a reaction image. "
+                    "A reaction contains data of the reactants, conditions, and products."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "image_path": {
+                            "type": "string",
+                            "description": "The path to the reaction image.",
+                        }
                     },
+                    "required": ["image_path"],
+                    "additionalProperties": False,
                 },
-                'required': ['image_path'],
-                'additionalProperties': False,
             },
-        },
-            },
-    ]
-
-    # 提供给 GPT 的消息内容
-    with open('./prompt/prompt_getreaction.txt', 'r', encoding='utf-8') as prompt_file:
-        prompt = prompt_file.read()
-    messages = [
-        {'role': 'system', 'content': 'You are a helpful assistant.'},
-        {
-            'role': 'user',
-            'content': [
-                {'type': 'text', 'text': prompt},
-                {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{base64_image}'}}
-            ]
         }
     ]
 
-    # 调用 GPT 接口
-    response = client.chat.completions.create(
-    model = 'gpt-4o',
-    temperature = 0,
-    response_format={ 'type': 'json_object' },
     messages = [
-        {'role': 'system', 'content': 'You are a helpful assistant.'},
+        {"role": "system", "content": "You are a helpful assistant."},
         {
-            'role': 'user',
-            'content': [
-                {
-                    'type': 'text',
-                    'text': prompt
-                },
-                {
-                    'type': 'image_url',
-                    'image_url': {
-                        'url': f'data:image/png;base64,{base64_image}'
-                    }
-                }
-            ]},
-    ],
-    tools = tools)
-    
-# Step 1: 工具映射表
-    TOOL_MAP = {
-        'get_reaction': get_reaction,
-    }
-
-    # Step 2: 处理多个工具调用
-    if not response.choices:
-        return {}
-    tool_calls = response.choices[0].message.tool_calls
-    results = []
-
-    # 遍历每个工具调用
-    for tool_call in tool_calls:
-        tool_name = tool_call.function.name
-        tool_arguments = tool_call.function.arguments
-        tool_call_id = tool_call.id
-        
-        tool_args = json.loads(tool_arguments)
-        
-        if tool_name in TOOL_MAP:
-            # 调用工具并获取结果
-            tool_result = TOOL_MAP[tool_name](image_path)
-        else:
-            raise ValueError(f"Unknown tool called: {tool_name}")
-        
-        # 保存每个工具调用结果
-        results.append({
-            'role': 'tool',
-            'name': tool_name,  # Gemini API 要求必须包含 name 字段
-            'content': json.dumps({
-                'image_path': image_path,
-                f'{tool_name}':(tool_result),
-            }),
-            'tool_call_id': tool_call_id,
-        })
-
-
-# Prepare the chat completion payload
-    completion_payload = {
-        'model': 'gpt-4o',
-        'messages': [
-            {'role': 'system', 'content': 'You are a helpful assistant.'},
-            {
-                'role': 'user',
-                'content': [
-                    {
-                        'type': 'text',
-                        'text': prompt
-                    },
-                    {
-                        'type': 'image_url',
-                        'image_url': {
-                            'url': f'data:image/png;base64,{base64_image}'
-                        }
-                    }
-                ]
-            },
-            response.choices[0].message,
-            *results
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}},
             ],
-    }
-
-# Generate new response
-    response = client.chat.completions.create(
-        model=completion_payload["model"],
-        messages=completion_payload["messages"],
-        response_format={ 'type': 'json_object' },
-        temperature=0
-    )
-
-
-    
-    # 获取 GPT 生成的结果
-    if not response.choices:
-        return {}
-    gpt_output = json.loads(response.choices[0].message.content)
-    #print(f"gpt_output1:{gpt_output}")
-
-    
-    def get_reaction_full(image_path: str) -> dict:
-        '''
-        Returns a structured dictionary of reactions extracted from the image,
-        including reactants, conditions, and products, with their smiles, text, and bbox.
-        '''
-        image_file = image_path
-        with CUDA_MODEL_LOCK:
-            raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
-        return raw_prediction
-
-    input2 = get_reaction_full(image_path)
-
-
-
-    def update_input_with_symbols(input1, input2, conversion_function):
-        symbol_mapping = {}
-        for key in ['reactants', 'products']:
-            for item in input1.get(key, []):
-                bbox = tuple(item['bbox'])  # 使用 bbox 作为唯一标识
-                symbol_mapping[bbox] = item['symbols']
-
-        for key in ['reactants', 'products']:
-            for item in input2.get(key, []):
-                bbox = tuple(item['bbox'])  # 获取 bbox 作为匹配键
-
-                # 如果 bbox 存在于 input1 的映射中，则更新 symbols
-                if bbox in symbol_mapping:
-                    updated_symbols = symbol_mapping[bbox]
-                    item['symbols'] = updated_symbols
-                    
-                    # 更新 atoms 的 atom_symbol
-                    if 'atoms' in item:
-                        atoms = item['atoms']
-                        if len(atoms) != len(updated_symbols):
-                            print(f"Warning: Mismatched symbols and atoms in bbox {bbox}")
-                        else:
-                            for atom, symbol in zip(atoms, updated_symbols):
-                                atom['atom_symbol'] = symbol
-                    
-                    # 如果 coords 和 edges 存在，调用转换函数生成新的 smiles 和 molfile
-                    if 'coords' in item and 'edges' in item:
-                        coords = item['coords']
-                        edges = item['edges']
-                        new_smiles, new_molfile, _ = conversion_function(coords, updated_symbols, edges)
-                        
-                        # 替换旧的 smiles 和 molfile
-                        item['smiles'] = new_smiles
-                        item['molfile'] = new_molfile
-
-        return input2
-    
-    updated_data = [update_input_with_symbols(gpt_output, input2[0], _convert_graph_to_smiles)]
-
-    return updated_data
-
- 
-
-
-def get_reaction_withatoms_correctR(image_path: str) -> dict:
-    """
-    输入化学反应图像路径，通过 GPT 模型和 OpenChemIE 提取反应信息并返回整理后的反应数据。
-
-    Args:
-        image_path (str): 图像文件路径。
-
-    Returns:
-        dict: 整理后的反应数据，包括反应物、产物和反应模板。
-    """
-    # 配置 API Key 和 Azure Endpoint
-    
-
-    client = AzureOpenAI(
-        api_key=API_KEY,
-        api_version=API_VERSION,
-        azure_endpoint=AZURE_ENDPOINT
-    )
-
-    # 加载图像并编码为 Base64
-    def encode_image(image_path: str):
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode('utf-8')
-
-    base64_image = encode_image(image_path)
-
-    # GPT 工具调用配置
-    tools = [
-        {
-        'type': 'function', 
-        'function': {
-            'name': 'get_reaction',
-            'description': 'Get a list of reactions from a reaction image. A reaction contains data of the reactants, conditions, and products.',
-            'parameters': {
-                'type': 'object',
-                'properties': {
-                    'image_path': {
-                        'type': 'string',
-                        'description': 'The path to the reaction image.',
-                    },
-                },
-                'required': ['image_path'],
-                'additionalProperties': False,
-            },
         },
-            },
     ]
 
-    # 提供给 GPT 的消息内容
-    with open('./prompt/prompt_Rxn_Tem.txt', 'r', encoding='utf-8') as prompt_file:
-        prompt = prompt_file.read()
-    messages = [
-        {'role': 'system', 'content': 'You are a helpful assistant.'},
-        {
-            'role': 'user',
-            'content': [
-                {'type': 'text', 'text': prompt},
-                {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{base64_image}'}}
-            ]
-        }
-    ]
+    # ── Parallel: LLM call 1  ∥  local model prefetch ────────────────────────
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        llm_future = ex.submit(
+            client.chat.completions.create,
+            model="gpt-5-mini",
+            temperature=0,
+            response_format={"type": "json_object"},
+            messages=messages,
+            tools=_TOOL_DEF,
+        )
+        raw_future = ex.submit(get_raw_prediction, image_path)
 
-    # 调用 GPT 接口
-    response = client.chat.completions.create(
-    model = 'gpt-5-mini',
-    temperature = 0,
-    response_format={ 'type': 'json_object' },
-    messages = [
-        {'role': 'system', 'content': 'You are a helpful assistant.'},
-        {
-            'role': 'user',
-            'content': [
-                {
-                    'type': 'text',
-                    'text': prompt
-                },
-                {
-                    'type': 'image_url',
-                    'image_url': {
-                        'url': f'data:image/png;base64,{base64_image}'
-                    }
-                }
-            ]},
-    ],
-    tools = tools)
-    
-# Step 1: 工具映射表
-    TOOL_MAP = {
-        'get_reaction': get_reaction,
-    }
+        response = llm_future.result()
+        raw_prediction = raw_future.result()   # likely already done; worst-case a brief wait
 
-    # Step 2: 处理多个工具调用
     if not response.choices:
         return {}
-    tool_calls = response.choices[0].message.tool_calls
-    results = []
+    tool_calls = response.choices[0].message.tool_calls or []
 
-    # 遍历每个工具调用
-    for tool_call in tool_calls:
-        tool_name = tool_call.function.name
-        tool_arguments = tool_call.function.arguments
-        tool_call_id = tool_call.id
-        
-        tool_args = json.loads(tool_arguments)
-        
-        if tool_name in TOOL_MAP:
-            # 调用工具并获取结果
-            tool_result = TOOL_MAP[tool_name](image_path)
-        else:
-            raise ValueError(f"Unknown tool called: {tool_name}")
-        
-        # 保存每个工具调用结果
-        results.append({
-            'role': 'tool',
-            'name': tool_name,  # Gemini API 要求必须包含 name 字段
-            'content': json.dumps({
-                'image_path': image_path,
-                f'{tool_name}':(tool_result),
-            }),
-            'tool_call_id': tool_call_id,
+    # Build tool-result messages using the already-computed raw prediction
+    tool_results = []
+    for tc in tool_calls:
+        if tc.function.name != "get_reaction":
+            continue
+        tool_result = _raw_to_structured(raw_prediction[0]) if raw_prediction else {}
+        tool_results.append({
+            "role": "tool",
+            "name": tc.function.name,
+            "content": json.dumps({"image_path": image_path, "get_reaction": tool_result}),
+            "tool_call_id": tc.id,
         })
 
-
-# Prepare the chat completion payload
-    completion_payload = {
-        'model': 'gpt-5-mini',
-        'messages': [
-            {'role': 'system', 'content': 'You are a helpful assistant.'},
-            {
-                'role': 'user',
-                'content': [
-                    {
-                        'type': 'text',
-                        'text': prompt
-                    },
-                    {
-                        'type': 'image_url',
-                        'image_url': {
-                            'url': f'data:image/png;base64,{base64_image}'
-                        }
-                    }
-                ]
-            },
-            response.choices[0].message,
-            *results
-            ],
-    }
-
-# Generate new response
-    response = client.chat.completions.create(
-        model=completion_payload["model"],
-        messages=completion_payload["messages"],
-        response_format={ 'type': 'json_object' },
+    # ── LLM call 2: symbol correction ────────────────────────────────────────
+    completion_payload_msgs = [
+        *messages,
+        response.choices[0].message,
+        *tool_results,
+    ]
+    response2 = client.chat.completions.create(
+        model="gpt-5-mini",
+        messages=completion_payload_msgs,
+        response_format={"type": "json_object"},
         temperature=0,
     )
 
-
-    
-    # 获取 GPT 生成的结果
-    if not response.choices:
+    if not response2.choices:
         return {}
-    gpt_output = json.loads(response.choices[0].message.content)
+    gpt_output = json.loads(response2.choices[0].message.content)
     print(f"gpt_output_rxn:{gpt_output}")
 
-    
-    def get_reaction_full(image_path: str) -> dict:
-        '''
-        Returns a structured dictionary of reactions extracted from the image,
-        including reactants, conditions, and products, with their smiles, text, and bbox.
-        '''
-
-        image_file = image_path
-        with CUDA_MODEL_LOCK:
-            raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
-        return raw_prediction
-
-    input2 = get_reaction_full(image_path)
-
-    if not input2:
-        print("WARNING [Azure]: get_reaction_full returned empty list, skipping symbol update")
+    # ── Merge: apply GPT-corrected symbols into raw prediction ───────────────
+    if not raw_prediction:
+        print("WARNING [Azure]: get_raw_prediction returned empty, skipping symbol update")
         return [gpt_output] if isinstance(gpt_output, dict) else []
 
-
-    def update_input_with_symbols(input1, input2, conversion_function):
-        symbol_mapping = {}
-        for key in ['reactants', 'conditions', 'products']:
-            for item in input1.get(key, []):
-                # 只处理有 symbols 和 bbox 字段的项（conditions 可能只有 text 字段而没有 symbols）
-                if 'symbols' in item and 'bbox' in item:
-                    bbox = tuple(item['bbox'])  # 使用 bbox 作为唯一标识
-                    symbol_mapping[bbox] = item['symbols']
-
-        for key in ['reactants', 'conditions', 'products']:
-            for item in input2.get(key, []):
-                if 'bbox' not in item:
-                    continue
-                bbox = tuple(item['bbox'])  # 获取 bbox 作为匹配键
-
-                # 如果 bbox 存在于 input1 的映射中，则更新 symbols
-                if bbox in symbol_mapping:
-                    updated_symbols = symbol_mapping[bbox]
-                    item['symbols'] = updated_symbols
-
-                    # 更新 atoms 的 atom_symbol
-                    if 'atoms' in item:
-                        atoms = item['atoms']
-                        if len(atoms) != len(updated_symbols):
-                            print(f"Warning: Mismatched symbols and atoms in bbox {bbox}")
-                        else:
-                            for atom, symbol in zip(atoms, updated_symbols):
-                                atom['atom_symbol'] = symbol
-
-                    # 如果 coords 和 edges 存在，调用转换函数生成新的 smiles 和 molfile
-                    if 'coords' in item and 'edges' in item:
-                        coords = item['coords']
-                        edges = item['edges']
-                        new_smiles, new_molfile, _ = conversion_function(coords, updated_symbols, edges)
-
-                        # 替换旧的 smiles 和 molfile
-                        item['smiles'] = new_smiles
-                        item['molfile'] = new_molfile
-
-        return input2
-
-    updated_data = [update_input_with_symbols(gpt_output, input2[0], _convert_graph_to_smiles)]
+    updated_data = [_update_input_with_symbols(gpt_output, raw_prediction[0], _convert_graph_to_smiles)]
     print(f"rxn_agent_output:{updated_data}")
-
     return updated_data
 
+
+# ── Open-source backend ───────────────────────────────────────────────────────
 
 def get_reaction_withatoms_correctR_OS(
     image_path: str,
@@ -596,234 +243,131 @@ def get_reaction_withatoms_correctR_OS(
     model_name: str = "/models/Qwen3-VL-32B-Instruct-AWQ",
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
-) -> dict:
- 
+) -> list:
+    """OS equivalent of get_reaction_withatoms_correctR (vLLM / Ollama).
 
-    base_url = base_url or os.getenv("VLLM_BASE_URL", os.getenv("OLLAMA_BASE_URL", "http://localhost:8000/v1"))
-    api_key = api_key or os.getenv("VLLM_API_KEY", os.getenv("OLLAMA_API_KEY", "EMPTY"))
+    Applies the same parallelism and deduplication as the Azure variant.
+    """
+    from get_R_group_sub_agent import extract_json_from_text_with_reasoning  # noqa: PLC0415
 
-    client = OpenAI(
-        base_url=base_url,
-        api_key=api_key,
-    )
+    client = resolve_os_client(base_url=base_url, api_key=api_key)
+    b64_image = encode_image(image_path)
+    prompt = read_prompt("./prompt/prompt_Rxn_Tem.txt")
 
-    # 加载图像并编码为 Base64
-    def encode_image(image_path: str):
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode('utf-8')
-
-    base64_image = encode_image(image_path)
-
-    # GPT 工具调用配置
-    tools = [
+    _TOOL_DEF = [
         {
-            'type': 'function', 
-            'function': {
-                'name': 'get_reaction',
-                'description': 'Get a list of reactions from a reaction image. A reaction contains data of the reactants, conditions, and products.',
-                'parameters': {
-                    'type': 'object',
-                    'properties': {
-                        'image_path': {
-                            'type': 'string',
-                            'description': 'The path to the reaction image.',
-                        },
+            "type": "function",
+            "function": {
+                "name": "get_reaction",
+                "description": (
+                    "Get a list of reactions from a reaction image. "
+                    "A reaction contains data of the reactants, conditions, and products."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "image_path": {
+                            "type": "string",
+                            "description": "The path to the reaction image.",
+                        }
                     },
-                    'required': ['image_path'],
-                    'additionalProperties': False,
+                    "required": ["image_path"],
+                    "additionalProperties": False,
                 },
             },
-        },
-    ]
-
-    # 提供给 GPT 的消息内容
-    with open('./prompt/prompt_Rxn_Tem.txt', 'r', encoding='utf-8') as prompt_file:
-        prompt = prompt_file.read()
-    messages = [
-        {'role': 'system', 'content': 'You are a helpful assistant.'},
-        {
-            'role': 'user',
-            'content': [
-                {'type': 'text', 'text': prompt},
-                {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{base64_image}'}}
-            ]
         }
     ]
 
-    # 调用 GPT 接口（带重试机制）
-    response = retry_api_call(
-        client.chat.completions.create,
-        max_retries=5,
-        base_delay=3,
-        backoff_factor=2,
-        model=model_name,
-        temperature=0,
-        #response_format={'type': 'json_object'},  # vLLM 不支持同时使用 response_format 和 tools
-        messages=messages,
-        tools=tools,
-        tool_choice="auto",
-    )
-    
-    # Step 1: 工具映射表
-    TOOL_MAP = {
-        'get_reaction': get_reaction,
-    }
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}},
+            ],
+        },
+    ]
 
-    # Step 2: 处理多个工具调用
+    # ── Parallel: LLM call 1  ∥  local model prefetch ────────────────────────
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        llm_future = ex.submit(
+            retry_api_call,
+            client.chat.completions.create,
+            5, 3, 2,
+            model=model_name,
+            temperature=0,
+            messages=messages,
+            tools=_TOOL_DEF,
+            tool_choice="auto",
+        )
+        raw_future = ex.submit(get_raw_prediction, image_path)
+
+        response = llm_future.result()
+        raw_prediction = raw_future.result()
+
     if not response.choices:
         return {}
     tool_calls = response.choices[0].message.tool_calls or []
-    results = []
 
-    # 遍历每个工具调用
-    for tool_call in tool_calls:
-        tool_name = tool_call.function.name
-        tool_arguments = tool_call.function.arguments
-        tool_call_id = tool_call.id
-        
-        tool_args = json.loads(tool_arguments)
-        
-        if tool_name in TOOL_MAP:
-            # 调用工具并获取结果
-            tool_result = TOOL_MAP[tool_name](image_path)
-        else:
-            raise ValueError(f"Unknown tool called: {tool_name}")
-        
-        # 保存每个工具调用结果
-        results.append({
-            'role': 'tool',
-            'name': tool_name,  # Gemini API 要求必须包含 name 字段
-            'content': json.dumps({
-                'image_path': image_path,
-                f'{tool_name}':(tool_result),
-            }),
-            'tool_call_id': tool_call_id,
+    tool_results = []
+    for tc in tool_calls:
+        if tc.function.name != "get_reaction":
+            continue
+        tool_result = _raw_to_structured(raw_prediction[0]) if raw_prediction else {}
+        tool_results.append({
+            "role": "tool",
+            "name": tc.function.name,
+            "content": json.dumps({"image_path": image_path, "get_reaction": tool_result}),
+            "tool_call_id": tc.id,
         })
 
-    # Prepare the chat completion payload
-    completion_payload = {
-        'model': model_name,
-        'messages': [
-            {'role': 'system', 'content': 'You are a helpful assistant.'},
-            {
-                'role': 'user',
-                'content': [
-                    {
-                        'type': 'text',
-                        'text': prompt
-                    },
-                    {
-                        'type': 'image_url',
-                        'image_url': {
-                            'url': f'data:image/png;base64,{base64_image}'
-                        }
-                    }
-                ]
-            },
-            response.choices[0].message,
-            *results
-            ],
-    }
-
-    # Generate new response（带重试机制）
-    response = retry_api_call(
+    # ── LLM call 2: symbol correction ────────────────────────────────────────
+    completion_msgs = [
+        *messages,
+        response.choices[0].message,
+        *tool_results,
+    ]
+    response2 = retry_api_call(
         client.chat.completions.create,
-        max_retries=5,
-        base_delay=3,
-        backoff_factor=2,
-        model=completion_payload["model"],
-        messages=completion_payload["messages"],
-        #response_format={'type': 'json_object'},  # vLLM 可能不支持
-        temperature=0
+        5, 3, 2,
+        model=model_name,
+        messages=completion_msgs,
+        temperature=0,
     )
 
-    # 获取 GPT 生成的结果（支持从包含思考过程的文本中提取）
-    from get_R_group_sub_agent import extract_json_from_text_with_reasoning
-    if not response.choices:
+    if not response2.choices:
         return {}
-    raw_content = response.choices[0].message.content
-    
+    raw_content = response2.choices[0].message.content
     try:
-        # 首先尝试直接解析
         gpt_output = json.loads(raw_content)
-        print(f"DEBUG [OS]: Successfully parsed JSON directly")
+        print("DEBUG [OS]: Successfully parsed JSON directly")
     except json.JSONDecodeError:
-        # 如果直接解析失败，使用智能提取函数
-        print(f"WARNING [OS]: Direct JSON parsing failed, trying to extract JSON from text...")
+        print("WARNING [OS]: Direct JSON parsing failed, trying to extract JSON from text...")
         gpt_output = extract_json_from_text_with_reasoning(raw_content)
-        
         if gpt_output is not None:
-            print(f"DEBUG [OS]: Successfully extracted JSON from text (with reasoning support)")
+            print("DEBUG [OS]: Successfully extracted JSON from text")
         else:
-            print(f"ERROR [OS]: Failed to parse JSON from model response")
+            print("ERROR [OS]: Failed to parse JSON from model response")
             print(f"Raw content (last 2000 chars):\n{raw_content[-2000:]}")
             raise json.JSONDecodeError(
-                f"Could not parse JSON from model response. Content may not be valid JSON.",
-                raw_content, 0
+                "Could not parse JSON from model response.", raw_content, 0
             )
-    
+
     print(f"gpt_output_rxn:{gpt_output}")
 
-    def get_reaction_full(image_path: str) -> dict:
-        '''
-        Returns a structured dictionary of reactions extracted from the image,
-        including reactants, conditions, and products, with their smiles, text, and bbox.
-        '''
-
-        image_file = image_path
-        with CUDA_MODEL_LOCK:
-            raw_prediction = model1.predict_image_file(image_file, molnextr=True, ocr=True)
-        return raw_prediction
-
-    input2 = get_reaction_full(image_path)
-
-    if not input2:
-        print("WARNING [OS]: get_reaction_full returned empty list, skipping symbol update")
+    # ── Merge ─────────────────────────────────────────────────────────────────
+    if not raw_prediction:
+        print("WARNING [OS]: get_raw_prediction returned empty, skipping symbol update")
         return [gpt_output] if isinstance(gpt_output, dict) else []
 
-    def update_input_with_symbols(input1, input2, conversion_function):
-        symbol_mapping = {}
-        for key in ['reactants', 'conditions', 'products']:
-            for item in input1.get(key, []):
-                # 只处理有 symbols 和 bbox 字段的项（conditions 可能只有 text 字段而没有 symbols）
-                if 'symbols' in item and 'bbox' in item:
-                    bbox = tuple(item['bbox'])  # 使用 bbox 作为唯一标识
-                    symbol_mapping[bbox] = item['symbols']
-
-        for key in ['reactants', 'conditions', 'products']:
-            for item in input2.get(key, []):
-                if 'bbox' not in item:
-                    continue
-                bbox = tuple(item['bbox'])  # 获取 bbox 作为匹配键
-
-                # 如果 bbox 存在于 input1 的映射中，则更新 symbols
-                if bbox in symbol_mapping:
-                    updated_symbols = symbol_mapping[bbox]
-                    item['symbols'] = updated_symbols
-
-                    # 更新 atoms 的 atom_symbol
-                    if 'atoms' in item:
-                        atoms = item['atoms']
-                        if len(atoms) != len(updated_symbols):
-                            print(f"Warning: Mismatched symbols and atoms in bbox {bbox}")
-                        else:
-                            for atom, symbol in zip(atoms, updated_symbols):
-                                atom['atom_symbol'] = symbol
-
-
-                    # 如果 coords 和 edges 存在，调用转换函数生成新的 smiles 和 molfile
-                    if 'coords' in item and 'edges' in item:
-                        coords = item['coords']
-                        edges = item['edges']
-                        new_smiles, new_molfile, _ = conversion_function(coords, updated_symbols, edges)
-                        
-                        # 替换旧的 smiles 和 molfile
-                        item['smiles'] = new_smiles
-                        item['molfile'] = new_molfile
-
-        return input2
-    
-    updated_data = [update_input_with_symbols(gpt_output, input2[0], _convert_graph_to_smiles)]
+    updated_data = [_update_input_with_symbols(gpt_output, raw_prediction[0], _convert_graph_to_smiles)]
     print(f"rxn_agent_output:{updated_data}")
-
     return updated_data
+
+
+# ── Legacy helpers (kept for callers that import them directly) ───────────────
+
+def get_reaction_withatoms(image_path: str) -> list:
+    """Legacy wrapper — delegates to get_reaction_withatoms_correctR."""
+    return get_reaction_withatoms_correctR(image_path)
