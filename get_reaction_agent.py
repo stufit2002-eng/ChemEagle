@@ -180,7 +180,6 @@ def get_reaction_withatoms_correctR(image_path: str) -> list:
         llm_future = ex.submit(
             client.chat.completions.create,
             model="gpt-5-mini",
-            temperature=0,
             response_format={"type": "json_object"},
             messages=messages,
             tools=_TOOL_DEF,
@@ -217,7 +216,6 @@ def get_reaction_withatoms_correctR(image_path: str) -> list:
         model="gpt-5-mini",
         messages=completion_payload_msgs,
         response_format={"type": "json_object"},
-        temperature=0,
     )
 
     if not response2.choices:
@@ -296,7 +294,6 @@ def get_reaction_withatoms_correctR_OS(
             client.chat.completions.create,
             5, 3, 2,
             model=model_name,
-            temperature=0,
             messages=messages,
             tools=_TOOL_DEF,
             tool_choice="auto",
@@ -333,7 +330,6 @@ def get_reaction_withatoms_correctR_OS(
         5, 3, 2,
         model=model_name,
         messages=completion_msgs,
-        temperature=0,
     )
 
     if not response2.choices:

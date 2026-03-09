@@ -194,7 +194,6 @@ def _run_mol_llm_round_trip(
         llm_future = ex.submit(
             client.chat.completions.create,
             model=model,
-            temperature=0,
             response_format={"type": "json_object"},
             messages=msgs_user,
             tools=_tool_def,
@@ -225,7 +224,6 @@ def _run_mol_llm_round_trip(
         model=model,
         messages=[*msgs_user, response1.choices[0].message, *tool_results],
         response_format={"type": "json_object"},
-        temperature=0,
     )
 
     if not response2.choices:
@@ -406,7 +404,6 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR_OS(
             client.chat.completions.create,
             5, 3, 2,
             model=model_name,
-            temperature=0,
             messages=msgs_user,
             tools=_tool_def,
             tool_choice="auto",
@@ -436,7 +433,6 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR_OS(
         5, 3, 2,
         model=model_name,
         messages=[*msgs_user, response1.choices[0].message, *tool_results],
-        temperature=0,
     )
 
     if not response2.choices:

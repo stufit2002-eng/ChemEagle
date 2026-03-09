@@ -208,7 +208,6 @@ def plan_observer_agent_OS(
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0,
             # response_format={"type": "json_object"},  # vLLM 可能不支持
         )
         content = response.choices[0].message.content
@@ -272,7 +271,6 @@ def action_observer_agent_OS(
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0,
             # response_format={"type": "json_object"},  # vLLM 可能不支持
         )
         content = response.choices[0].message.content

@@ -468,7 +468,6 @@ def ChemEagle_OS(
     # Step 1: 调用 planner 获取 agent 列表
     planner_response = client.chat.completions.create(
         model=model_name,
-        temperature=0,
         messages=[
             {'role': 'system', 'content': "You are a chemical image understanding and extraction planning expert.After checking the image, your ONLY task is to SELECT and CALL the most appropriate agents from the list below to best fit the data extraction of the image."},
             {
@@ -652,7 +651,6 @@ def ChemEagle_OS(
         return client.chat.completions.create(
             model=model_name,
             messages=final_messages_os,
-            temperature=0,
         )
 
     with ThreadPoolExecutor(max_workers=2) as _ex:

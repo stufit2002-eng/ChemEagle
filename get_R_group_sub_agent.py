@@ -1145,7 +1145,6 @@ def process_reaction_image_with_product_variant_R_group_OS(
             base_delay=3,
             backoff_factor=2,
             model=model_name,
-            temperature=0,
             messages=[
                 {'role': 'system', 'content': 'You are a helpful assistant.'},
                 {'role': 'user', 'content': [
@@ -1233,7 +1232,6 @@ def process_reaction_image_with_product_variant_R_group_OS(
         model=completion_payload["model"],
         messages=completion_payload["messages"],
         #response_format={'type': 'json_object'},
-        temperature=0
     )
 
     # 获取 GPT 生成的结果
@@ -1386,7 +1384,6 @@ def process_reaction_image_with_table_R_group(image_path: str) -> dict:
     
     response = client.chat.completions.create(
     model = 'gpt-5-mini',
-    temperature = 0,
     response_format={ 'type': 'json_object' },
     messages = [
         {'role': 'system', 'content': 'You are a helpful assistant.'},
@@ -1471,7 +1468,6 @@ def process_reaction_image_with_table_R_group(image_path: str) -> dict:
         model=completion_payload["model"],
         messages=completion_payload["messages"],
         response_format={ 'type': 'json_object' },
-        temperature=0,
     )
 
     #print(response)
@@ -1669,7 +1665,6 @@ def process_reaction_image_with_table_R_group_OS(
         base_delay=3,
         backoff_factor=2,
         model=model_name,
-        temperature=0,
         #response_format={'type': 'json_object'},
         messages=[
             {'role': 'system', 'content': 'You are a helpful assistant.'},
@@ -1756,7 +1751,6 @@ def process_reaction_image_with_table_R_group_OS(
         model=completion_payload["model"],
         messages=completion_payload["messages"],
         #response_format={'type': 'json_object'},
-        temperature=0
     )
     
     if not response.choices:
