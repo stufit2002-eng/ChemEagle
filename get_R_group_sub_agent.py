@@ -1141,7 +1141,9 @@ def process_reaction_image_with_product_variant_R_group_OS(
         _llm_fut = _pre.submit(
             retry_api_call,
             client.chat.completions.create,
-            5, 3, 2,  # max_retries, base_delay, backoff_factor
+            max_retries=5,
+            base_delay=3,
+            backoff_factor=2,
             model=model_name,
             temperature=0,
             messages=[

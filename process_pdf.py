@@ -48,15 +48,41 @@ Usage:
 
 import argparse
 import json
+import logging
 import re
+import sys
 import threading
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
 import torch
 from PIL import Image
+
+# ── Logging setup ─────────────────────────────────────────────────────────────
+# Force line-buffered stdout/stderr so every log line appears in nohup.out
+# immediately, even when stdout is not a TTY.
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)-8s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stdout,   # nohup captures stdout; use `2>&1` to also capture stderr
+    force=True,
+)
+logger = logging.getLogger("chemeagle.pdf")
+
+# Route any unhandled exception through the logger so it lands in nohup.out
+def _excepthook(exc_type, exc_value, exc_tb):
+    logger.critical(
+        "Unhandled exception:\n%s",
+        "".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
+    )
+sys.excepthook = _excepthook
 
 # ── CUDA guard ────────────────────────────────────────────────────────────────
 if not torch.cuda.is_available():
@@ -70,13 +96,10 @@ torch.backends.cudnn.benchmark = True   # auto-tune conv kernels
 
 MAX_RETRIES = 3   # maximum retry attempts per crop (not counting the initial attempt)
 
-# Thread-safe print
-_print_lock = threading.Lock()
-
+# logging is already thread-safe; no extra lock needed
 def _tprint(*args, **kwargs):
-    """Thread-safe print."""
-    with _print_lock:
-        print(*args, **kwargs)
+    """Kept for backward compat — routes to logger.info."""
+    logger.info(" ".join(str(a) for a in args))
 
 
 # ── VisualHeist (Florence-2) detection — CUDA-aware wrapper ──────────────────
@@ -89,10 +112,10 @@ def _load_visualheist(model_size: str):
     model_id  = LARGE_MODEL_ID if use_large else BASE_MODEL_ID
     tag       = "large" if use_large else "base"
 
-    print(f"  Loading VisualHeist-{tag} …", flush=True)
+    logger.info("Loading VisualHeist-%s …", tag)
     model, processor = _create_model(model_id, tag)
     model = model.to(DEVICE).eval()
-    print("  VisualHeist loaded on CUDA.")
+    logger.info("VisualHeist-%s loaded on CUDA.", tag)
     return model, processor
 
 
@@ -263,6 +286,8 @@ def _run_crop(task: dict, chemeagle_fn) -> dict:
     crop_result_path = Path(task["crop_result_path"])
     crop_meta_path   = Path(task["crop_meta_path"])
 
+    tag = f"[p{page_num}/c{crop_num}] {crop_stem}"
+
     # ── Skipped crops (e.g. tables) ──────────────────────────────────────────
     if task.get("skipped"):
         result       = {"skipped": True, "reason": task.get("skip_reason", "")}
@@ -271,8 +296,7 @@ def _run_crop(task: dict, chemeagle_fn) -> dict:
         elapsed      = 0.0
         hitl         = False
         hitl_reasons = []
-        _tprint(f"    [p{page_num}/c{crop_num}] {crop_stem}  "
-                f"[skipped — {task.get('skip_reason', 'table')}]")
+        logger.info("%s  SKIPPED (%s)", tag, task.get("skip_reason", "table"))
 
     # ── Active crops ─────────────────────────────────────────────────────────
     else:
@@ -283,32 +307,35 @@ def _run_crop(task: dict, chemeagle_fn) -> dict:
         hitl_reasons = []
         elapsed      = 0.0
 
+        logger.info("%s  starting  image=%s", tag, crop_img_path.name)
+
         for attempt in range(MAX_RETRIES + 1):   # 0 = initial, 1-3 = retries
             attempt_tag = "initial" if attempt == 0 else f"retry {attempt}/{MAX_RETRIES}"
             t_start = time.perf_counter()
 
             try:
+                logger.debug("%s  [%s] calling ChemEagle …", tag, attempt_tag)
                 result   = chemeagle_fn(str(crop_img_path))
                 elapsed += time.perf_counter() - t_start
 
+                logger.debug("%s  [%s] ChemEagle returned in %.1fs, running quality checks …",
+                             tag, attempt_tag, elapsed)
                 issues = _check_result_issues(result)
 
                 if not issues:
                     # ── All quality checks passed ─────────────────────────
                     success = True
                     n_rxn   = len((result or {}).get("reactions", []))
-                    retry_note = f", after {attempt} retry/retries" if attempt > 0 else ""
-                    _tprint(f"    [p{page_num}/c{crop_num}] {crop_stem}  "
-                            f"ok  ({elapsed:.1f}s, {n_rxn} rxn(s){retry_note})")
+                    retry_note = f"  (needed {attempt} retry/retries)" if attempt > 0 else ""
+                    logger.info("%s  OK  %.1fs  %d rxn(s)%s", tag, elapsed, n_rxn, retry_note)
                     break
 
                 else:
                     # ── Quality issue detected ────────────────────────────
                     if attempt < MAX_RETRIES:
                         delay = 2 ** attempt   # 1 s, 2 s, 4 s …
-                        _tprint(f"    [p{page_num}/c{crop_num}] {crop_stem}  "
-                                f"quality issue [{', '.join(issues)}] "
-                                f"— {attempt_tag}, retrying in {delay}s …")
+                        logger.warning("%s  quality issue [%s] — %s, retrying in %ds …",
+                                       tag, ", ".join(issues), attempt_tag, delay)
                         time.sleep(delay)
                     else:
                         # Max retries exhausted — flag for human review
@@ -318,9 +345,8 @@ def _run_crop(task: dict, chemeagle_fn) -> dict:
                         result.setdefault("human_review_required", True)
                         result["human_review_reasons"] = hitl_reasons
                         n_rxn = len((result or {}).get("reactions", []))
-                        _tprint(f"    [p{page_num}/c{crop_num}] {crop_stem}  "
-                                f"HITL  ({elapsed:.1f}s, {n_rxn} rxn(s), "
-                                f"issues: {', '.join(issues)})")
+                        logger.warning("%s  HITL  %.1fs  %d rxn(s)  issues=[%s]",
+                                       tag, elapsed, n_rxn, ", ".join(issues))
                         break
 
             except Exception as exc:
@@ -329,9 +355,11 @@ def _run_crop(task: dict, chemeagle_fn) -> dict:
 
                 if attempt < MAX_RETRIES:
                     delay = 2 ** attempt   # 1 s, 2 s, 4 s …
-                    _tprint(f"    [p{page_num}/c{crop_num}] {crop_stem}  "
-                            f"error ({error[:70]}) — {attempt_tag}, "
-                            f"retrying in {delay}s …")
+                    logger.warning(
+                        "%s  exception on %s (retrying in %ds):\n%s",
+                        tag, attempt_tag, delay,
+                        traceback.format_exc(),
+                    )
                     time.sleep(delay)
                     error = None   # reset before next attempt
                 else:
@@ -344,8 +372,11 @@ def _run_crop(task: dict, chemeagle_fn) -> dict:
                         "human_review_required": True,
                         "human_review_reasons":  hitl_reasons,
                     }
-                    _tprint(f"    [p{page_num}/c{crop_num}] {crop_stem}  "
-                            f"FAILED+HITL  ({error[:70]})")
+                    logger.error(
+                        "%s  FAILED+HITL after %d attempts  error=%s\nFull traceback:\n%s",
+                        tag, MAX_RETRIES + 1, error,
+                        traceback.format_exc(),
+                    )
                     break
 
     # ── Write result JSON ─────────────────────────────────────────────────────
@@ -426,16 +457,16 @@ def process_pdf(
     ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path(output_root) / f"{pdf_path.stem}_{ts}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    print(f"\nOutput directory : {run_dir}")
+    logger.info("Output directory : %s", run_dir)
 
     # ── Step 1: PDF → per-page PIL images ────────────────────────────────────
-    print("\n[1/3] Converting PDF pages to images …")
+    logger.info("[1/3] Converting PDF pages to images …")
     from pdfmodel.methods import _pdf_to_image  # noqa: PLC0415
     page_images = _pdf_to_image(str(pdf_path))
-    print(f"      {len(page_images)} page(s) loaded.")
+    logger.info("[1/3] %d page(s) loaded.", len(page_images))
 
     # ── Step 2: Load models ───────────────────────────────────────────────────
-    print("\n[2/3] Loading models …")
+    logger.info("[2/3] Loading models …")
     vh_model, vh_processor = _load_visualheist(model_size)
 
     if backend == "azure":
@@ -445,12 +476,12 @@ def process_pdf(
         from main import ChemEagle_OS as _ce_os  # noqa: PLC0415
         chemeagle_fn = _ce_os
 
-    print(f"      ChemEagle backend : {backend}")
-    print(f"      Parallel workers  : {workers}")
-    print(f"      Max retries/crop  : {MAX_RETRIES}")
+    logger.info("[2/3] ChemEagle backend : %s", backend)
+    logger.info("[2/3] Parallel workers  : %d", workers)
+    logger.info("[2/3] Max retries/crop  : %d", MAX_RETRIES)
 
     # ── Step 3a: Detection — sequential (GPU) ─────────────────────────────────
-    print("\n[3/3] Detecting figures …\n")
+    logger.info("[3/3] Detecting figures …")
 
     summary: dict = {
         "pdf":           str(pdf_path),
@@ -469,18 +500,19 @@ def process_pdf(
 
     for page_idx, page_img in enumerate(page_images):
         page_num = page_idx + 1
-        print(f"  ── Page {page_num}/{len(page_images)} ", end="", flush=True)
+        logger.info("── Page %d/%d", page_num, len(page_images))
 
         try:
             annotation = _detect_figures(page_img, vh_model, vh_processor)
         except Exception as det_err:
-            print(f"[detection failed: {det_err}]")
+            logger.error("Page %d: detection failed:\n%s", page_num, traceback.format_exc())
             page_entries.append({"page": page_num, "n_detected": 0, "crops": []})
             continue
 
         bboxes = annotation.get("bboxes", [])
         labels = annotation.get("labels", [])
-        print(f"→ {len(bboxes)} object(s) detected")
+        logger.info("Page %d: %d object(s) detected: %s",
+                    page_num, len(bboxes), labels)
 
         if not bboxes:
             page_entries.append({"page": page_num, "n_detected": 0, "crops": []})
@@ -531,11 +563,11 @@ def process_pdf(
         page_entries.append(page_entry)
 
     total_crops = len(all_tasks)
-    print(f"\n  {total_crops} crop(s) queued across {len(page_images)} page(s).")
+    logger.info("%d crop(s) queued across %d page(s).", total_crops, len(page_images))
 
     # ── Step 3b: ChemEagle — parallel ─────────────────────────────────────────
-    print(f"\n  Running ChemEagle with {workers} worker(s) "
-          f"(up to {MAX_RETRIES} retries per crop) …\n")
+    logger.info("Running ChemEagle with %d worker(s) (up to %d retries per crop) …",
+                workers, MAX_RETRIES)
 
     total_success = 0
     total_skipped = 0
@@ -555,6 +587,11 @@ def process_pdf(
                 info = future.result()
             except Exception as exc:
                 task = future_to_task[future]
+                logger.error(
+                    "[p%d/c%d] unhandled future exception:\n%s",
+                    task["page_num"], task["crop_num"],
+                    traceback.format_exc(),
+                )
                 info = {
                     "page_num":    task["page_num"],
                     "crop_num":    task["crop_num"],
@@ -623,23 +660,25 @@ def process_pdf(
     )
 
     # ── Final report ──────────────────────────────────────────────────────────
-    print(f"\n{'='*60}")
-    print(f"  PDF pipeline complete")
-    print(f"  PDF            : {pdf_path.name}")
-    print(f"  Pages          : {len(page_images)}")
-    print(f"  Crops total    : {total_crops}")
-    print(f"    ✓ success    : {total_success}")
-    print(f"    ✗ failed     : {total_failed}")
-    print(f"    ⚠ HITL       : {total_hitl}  (human review required)")
-    print(f"    — skipped    : {total_skipped}")
+    sep = "=" * 60
+    logger.info(sep)
+    logger.info("PDF pipeline complete")
+    logger.info("  PDF            : %s", pdf_path.name)
+    logger.info("  Pages          : %d", len(page_images))
+    logger.info("  Crops total    : %d", total_crops)
+    logger.info("    success      : %d", total_success)
+    logger.info("    failed       : %d", total_failed)
+    logger.info("    HITL         : %d  (human review required)", total_hitl)
+    logger.info("    skipped      : %d", total_skipped)
     if hitl_crops:
-        print(f"\n  Crops flagged for human review:")
+        logger.warning("Crops flagged for human review:")
         for h in hitl_crops:
-            print(f"    page {h['page']} / crop {h['crop']}  "
-                  f"({h['label']})  reasons: {', '.join(h['human_review_reasons'])}")
-    print(f"\n  Workers  : {workers}   Max retries : {MAX_RETRIES}")
-    print(f"  Output   : {run_dir}")
-    print(f"{'='*60}\n")
+            logger.warning("  page %d / crop %d  (%s)  reasons: %s",
+                           h["page"], h["crop"], h["label"],
+                           ", ".join(h["human_review_reasons"]))
+    logger.info("  Workers  : %d   Max retries : %d", workers, MAX_RETRIES)
+    logger.info("  Output   : %s", run_dir)
+    logger.info(sep)
 
     return run_dir
 
