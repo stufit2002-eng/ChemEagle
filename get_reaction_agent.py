@@ -324,6 +324,7 @@ def get_reaction_withatoms_correctR_OS(
         *messages,
         response.choices[0].message,
         *tool_results,
+        {"role": "user", "content": "Based on the tool results above, please provide your response in JSON format."},
     ]
     response2 = retry_api_call(
         client.chat.completions.create,

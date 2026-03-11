@@ -432,7 +432,12 @@ def process_reaction_image_with_multiple_products_and_text_correctmultiR_OS(
         client.chat.completions.create,
         5, 3, 2,
         model=model_name,
-        messages=[*msgs_user, response1.choices[0].message, *tool_results],
+        messages=[
+            *msgs_user,
+            response1.choices[0].message,
+            *tool_results,
+            {"role": "user", "content": "Based on the tool results above, please provide your response in JSON format."},
+        ],
     )
 
     if not response2.choices:

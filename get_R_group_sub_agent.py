@@ -1219,7 +1219,8 @@ def process_reaction_image_with_product_variant_R_group_OS(
                 ]
             },
             response.choices[0].message,
-            *results
+            *results,
+            {'role': 'user', 'content': 'Based on the tool results above, please provide your response in JSON format.'},
             ],
     }
 
