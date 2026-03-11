@@ -616,15 +616,15 @@ def ChemEagle_OS(
         })
     
     print(f'[OS_D] results: {results}')
-    
+
     # Prepare the final synthesis payload
-    executed_tools = [selected_tool]
-    if has_text_extraction:
-        executed_tools.append("text_extraction_agent")
-    assistant_message = {
-        "role": "assistant",
-        "content": f"Selected agents: {', '.join(agent_list)}\nExecuted tools: {', '.join(executed_tools)}"
-    }
+    # Tool results are embedded as text in the user message rather than using
+    # `role: tool` messages, which require a preceding assistant `tool_calls`
+    # array that is absent in this non-tool-calling flow.
+    tool_results_text = "\n\n".join([
+        f"[{log['name']}]:\n{json.dumps(log['result'], indent=2)}"
+        for log in execution_logs
+    ])
 
     final_messages_os = [
         {'role': 'system', 'content': 'You are a helpful assistant.'},
@@ -632,11 +632,10 @@ def ChemEagle_OS(
             'role': 'user',
             'content': [
                 {'type': 'text', 'text': prompt},
-                {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{base64_image}'}}
+                {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{base64_image}'}},
+                {'type': 'text', 'text': f"\n\nTool extraction results:\n{tool_results_text}"},
             ],
         },
-        assistant_message,
-        *results,
     ]
 
     # Action Observer and final synthesis run in parallel
