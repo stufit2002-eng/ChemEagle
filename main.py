@@ -2,6 +2,7 @@ import json
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Optional
 
 from openai import AzureOpenAI, OpenAI
@@ -512,12 +513,13 @@ def ChemEagle_OS(
     
     print(f"[OS_D] Selected tool: {selected_tool}")
     
+    _os_kwargs = dict(model_name=model_name, base_url=base_url, api_key=api_key)
     TOOL_MAP = {
-        'process_reaction_image_with_product_variant_R_group': process_reaction_image_with_product_variant_R_group_OS,
-        'process_reaction_image_with_table_R_group': process_reaction_image_with_table_R_group_OS,
+        'process_reaction_image_with_product_variant_R_group': partial(process_reaction_image_with_product_variant_R_group_OS, **_os_kwargs),
+        'process_reaction_image_with_table_R_group': partial(process_reaction_image_with_table_R_group_OS, **_os_kwargs),
         'get_full_reaction_template': get_full_reaction_template_OS,
         'get_multi_molecular_full': get_multi_molecular_full,
-        'text_extraction_agent': text_extraction_agent_OS
+        'text_extraction_agent': partial(text_extraction_agent_OS, **_os_kwargs),
     }
     
     # Step 3: 构建执行计划（支持 observer）
